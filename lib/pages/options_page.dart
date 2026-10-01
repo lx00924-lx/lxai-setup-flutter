@@ -16,10 +16,12 @@ class OptionsPage extends StatefulWidget {
     required this.agreed,
     required this.desktopIcon,
     required this.autoStart,
+    required this.allUsers,
     required this.onDirChanged,
     required this.onAgreedChanged,
     required this.onDesktopIconChanged,
     required this.onAutoStartChanged,
+    required this.onAllUsersChanged,
     required this.onBack,
     required this.onStart,
   });
@@ -28,10 +30,12 @@ class OptionsPage extends StatefulWidget {
   final bool agreed;
   final bool desktopIcon;
   final bool autoStart;
+  final bool allUsers;
   final ValueChanged<String> onDirChanged;
   final ValueChanged<bool> onAgreedChanged;
   final ValueChanged<bool> onDesktopIconChanged;
   final ValueChanged<bool> onAutoStartChanged;
+  final ValueChanged<bool> onAllUsersChanged;
   final VoidCallback onBack;
   final VoidCallback onStart;
 
@@ -42,10 +46,6 @@ class OptionsPage extends StatefulWidget {
 class _OptionsPageState extends State<OptionsPage> {
   late final TextEditingController _dirCtrl =
       TextEditingController(text: widget.installDir);
-
-  /// 「为所有用户」是 M0 的界面占位：真正提权在 M3 做
-  /// （勾了之后用 ShellExecuteW(runas) 带 /ALLUSERS 重启自己，见 笔记-04 §5）
-  bool _allUsers = false;
 
   static String _programFilesDir() {
     final pf = Platform.environment['ProgramFiles'] ?? r'C:\Program Files';
@@ -58,9 +58,10 @@ class _OptionsPageState extends State<OptionsPage> {
     super.dispose();
   }
 
+  /// 「为所有用户」由外壳统一持有（安装计划要用它决定 HKLM/HKCU 与公共快捷方式），
+  /// 这里只负责把变化往上抛，顺带把安装路径切到对应的默认位置。
   void _toggleAllUsers(bool v) {
-    setState(() => _allUsers = v);
-    // 安装位置跟着权限模式走，避免出现"选了 Program Files 却按用户目录装"的错位
+    widget.onAllUsersChanged(v);
     _dirCtrl.text = v ? _programFilesDir() : _defaultUserDir();
     widget.onDirChanged(_dirCtrl.text);
   }
@@ -164,7 +165,7 @@ class _OptionsPageState extends State<OptionsPage> {
             label: '开机自动启动',
           ),
           _SwitchRow(
-            value: _allUsers,
+            value: widget.allUsers,
             onChanged: _toggleAllUsers,
             label: '为所有用户安装',
             hint: '需要管理员权限，将安装到 Program Files',

@@ -52,3 +52,5 @@ app.*.map.json
 windows/flutter/generated_plugin_registrant.cc
 windows/flutter/generated_plugin_registrant.h
 windows/flutter/generated_plugins.cmake
+# 安装素材（开发期外置，由构建脚本组装，不入库）
+/payload/
