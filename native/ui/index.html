@@ -30,8 +30,7 @@
     background:linear-gradient(135deg,var(--deep-a),var(--deep-b));
     color:#fff; -webkit-user-select:none; user-select:none; cursor:default;
   }
-  .titlebar .logo{width:22px;height:22px;margin:0 10px 0 14px;border-radius:6px;
-    background:linear-gradient(135deg,#38BDF8,#0284C7);}
+  .titlebar .logo{width:22px;height:22px;margin:0 10px 0 14px;border-radius:6px;display:block}
   .titlebar .title{font-size:13px;font-weight:600;letter-spacing:.3px}
   .titlebar .spacer{flex:1}
   .titlebar button{
@@ -54,9 +53,12 @@
     background:radial-gradient(closest-side,rgba(125,211,252,.30),rgba(2,132,199,.08),transparent);
     pointer-events:none;
   }
-  .brand .mark{width:76px;height:76px;border-radius:20px;margin-bottom:20px;
-    background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);
-    display:flex;align-items:center;justify-content:center;font-size:29px}
+  /* 品牌标识用的是**真·App 图标**（app_icon.png），不是 CSS 画的方块或 emoji ——
+     安装器和成品 App 必须是同一张脸，否则用户会怀疑自己装的是别的东西。 */
+  .brand .mark{width:88px;height:88px;border-radius:22px;margin-bottom:22px;
+    overflow:hidden;display:block;
+    box-shadow:0 12px 28px rgba(0,0,0,.38), 0 0 0 1px rgba(255,255,255,.12)}
+  .brand .mark img{width:100%;height:100%;display:block}
   .brand h1{font-size:27px;font-weight:800;letter-spacing:.5px}
   .brand .sub{margin-top:5px;font-size:12.5px;color:#93C5FD}
 
@@ -144,7 +146,7 @@
 
   <!-- 无边框窗口的自绘标题栏：拖拽/最小化/关闭都经 JS → C++ 桥发过去 -->
   <div class="titlebar" id="titlebar">
-    <div class="logo"></div>
+    <img class="logo" src="app_icon.png" alt="">
     <div class="title">LxAI 安装程序</div>
     <div class="spacer"></div>
     <button id="btn-min" title="最小化">&#x2500;</button>
@@ -153,7 +155,7 @@
 
   <div class="body">
     <aside class="brand">
-      <div class="mark">&#x1F517;</div>
+      <div class="mark"><img src="app_icon.png" alt="LxAI"></div>
       <h1>LxAI</h1>
       <div class="sub">私有 Agent 远程遥控</div>
       <ol class="steps" id="steps">
@@ -180,8 +182,6 @@
               <span class="k">安装素材</span><span class="v" id="v-payload">正在检测…</span></div>
             <div class="row"><span class="dot" id="d-bridge"></span>
               <span class="k">界面通道</span><span class="v" id="v-bridge">正在等待宿主回包…</span></div>
-            <div class="row"><span class="dot ok"></span>
-              <span class="k">当前架构</span><span class="v" id="v-arch">—</span></div>
           </div>
           <div class="card">
             <h3>这套安装器是怎么工作的</h3>
@@ -270,13 +270,15 @@
           <div class="card">
             <h3>接下来</h3>
             <div class="muted" style="margin-top:0">
-              从开始菜单或桌面快捷方式启动 LxAI。<br>
+              点「启动应用」立即打开 LxAI（也可以从安装目录里的 <code>LxAI.exe</code> 打开）。<br>
               首次启动请在手机端扫码配对，电脑端会自动拉起桥接进程。
             </div>
+            <div class="hint" id="launch-note" style="margin-top:9px"></div>
           </div>
         </div>
         <div class="actions">
-          <button class="btn primary" id="btn-finish">关闭</button>
+          <button class="btn primary" id="btn-launch">启动应用</button>
+          <button class="btn" id="btn-finish">完成安装</button>
         </div>
       </section>
 
@@ -367,10 +369,6 @@
           : '—';
         $('v-src').textContent = m.payloadDir || '—';
 
-        // ④ 架构
-        $('v-arch').textContent =
-          (navigator.userAgent.match(/x64|WOW64|Win64/) ? 'x64' : 'x86') + ' · ' + navigator.platform;
-
         installDir = m.defaultDir || '';
         $('dir-input').value = installDir;
 
@@ -400,6 +398,20 @@
           '安装位置：' + (m.dir || installDir) + '\n' +
           '已铺开 ' + m.files + ' 个文件，共 ' + fmtBytes(m.bytes) + '。' + closedNote;
         showView('view-done', 4);
+      }
+
+      else if (m.type === 'launch-result') {
+        // 刻意**不自动关掉安装器**：万一 App 起不来（被杀软拦、缺 VC 运行库等），
+        // 窗口已经消失的话用户只剩一脸茫然。留在原地把结果说清楚。
+        if (m.ok) {
+          $('btn-launch').disabled = true;
+          $('btn-launch').textContent = '已启动';
+          $('launch-note').style.color = 'var(--ok)';
+          $('launch-note').textContent = 'LxAI 已启动，稍等片刻就会出现窗口。';
+        } else {
+          $('launch-note').style.color = 'var(--danger)';
+          $('launch-note').textContent = m.message || '启动失败，请到安装目录手动运行 LxAI.exe。';
+        }
       }
 
       else if (m.type === 'install-error') {
@@ -433,6 +445,11 @@
     $('prog-fill').style.width = '0%';
     showView('view-progress', 3);
     send('start-install', { dir: installDir });
+  };
+  $('btn-launch').onclick = function () {
+    $('launch-note').style.color = 'var(--text-faint)';
+    $('launch-note').textContent = '正在启动…';
+    send('launch-app', { dir: installDir });
   };
   $('btn-finish').onclick = function () { send('close'); };
   $('btn-err-back').onclick = function () { showView('view-options', 2); };

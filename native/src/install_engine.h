@@ -46,6 +46,13 @@ using ProgressFn = std::function<void(const InstallProgress&)>;
 /// 单独暴露出来，界面可以在**开始装之前**就告诉用户素材有没有问题。
 bool PayloadLooksComplete(const std::wstring& payloadDir);
 
+/// 装完之后主程序在哪：`{installDir}\LxAI.exe`。
+///
+/// 注意素材里它叫 `app\LxAI.exe`，装完是**铺平到根目录**的（见 install_engine.cpp 的
+/// `MapToTarget`）。"启动应用"按钮和以后的快捷方式都要用这个函数，不要各自拼字符串 ——
+/// 拼错了就是一个"点启动没反应"的按钮。
+std::wstring AppExePath(const std::wstring& installDir);
+
 /// 素材里的文件数与总字节数 —— 用于估算进度与"需要多少磁盘"。
 /// 拿不到时返回 false（调用方不该因此中止，只是进度按不定长显示）。
 bool MeasurePayload(const std::wstring& payloadDir, int& fileCount, unsigned long long& totalBytes);

@@ -221,6 +221,30 @@ void BeginWindowDrag(HWND hwnd) {
   SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
 }
 
+/// 窗口/任务栏图标（Alt+Tab、任务栏、标题栏左上角那一个小方块）。
+///
+/// 不设的话这三处都是系统默认的空白图标 —— 安装器一眼看着就不像正经软件。
+/// 用界面目录里的 `app_icon.ico`（与 App 是同一张脸，见 native/ui/）。
+/// 找不到就算了，**不因此让安装失败**：图标是锦上添花，不是功能。
+HICON g_iconSmall = nullptr;
+HICON g_iconBig = nullptr;
+
+void ApplyWindowIcon(HWND hwnd, const std::wstring& uiFile) {
+  const std::wstring ico = ParentDir(uiFile) + L"\\app_icon.ico";
+
+  // 大、小两个尺寸分别取系统要的像素数：多尺寸 .ico 里让 LoadImage 挑最合适的那张，
+  // 比"加载一张让系统缩"清晰得多（16×16 用 256×256 缩出来是糊的）。
+  g_iconSmall = static_cast<HICON>(LoadImageW(
+      nullptr, ico.c_str(), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+      GetSystemMetrics(SM_CYSMICON), LR_LOADFROMFILE));
+  g_iconBig = static_cast<HICON>(LoadImageW(
+      nullptr, ico.c_str(), IMAGE_ICON, GetSystemMetrics(SM_CXICON),
+      GetSystemMetrics(SM_CYICON), LR_LOADFROMFILE));
+
+  if (g_iconSmall) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(g_iconSmall));
+  if (g_iconBig) SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(g_iconBig));
+}
+
 // ───────────────────────── 桥：JS → C++ ─────────────────────────
 
 /// 解析 JS 发来的最小 JSON：只认 `{"type":"xxx"}` 这一种形状。
@@ -323,6 +347,41 @@ void RunInstallOnWorker(std::wstring payloadDir, std::wstring installDir) {
   g_installing = false;
 }
 
+/// 启动刚装好的 App（完成页的「启动应用」）。
+///
+/// 刻意**不**在启动后关掉安装器：万一 App 起不来（被杀软拦、缺运行库…），
+/// 窗口已经消失的话用户只剩一脸茫然。结果回给界面显示，关不关由用户决定。
+void LaunchInstalledApp(const std::wstring& installDir) {
+  const std::wstring exe = lxai::AppExePath(installDir);
+  if (exe.empty() || GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    SendToJs(L"{\"type\":\"launch-result\",\"ok\":false,\"message\":\"没找到 " +
+             JsonEscape(exe.empty() ? installDir : exe) + L"，请到安装目录手动运行 LxAI.exe。\"}");
+    return;
+  }
+
+  // 工作目录设成安装目录：Flutter 应用按理能按 exe 位置找到自己的 data\，
+  // 但把 cwd 也设对是零成本的保险（用相对路径读文件时不会读错地方）。
+  const HINSTANCE r =
+      ShellExecuteW(g_hwnd, L"open", exe.c_str(), nullptr, installDir.c_str(), SW_SHOWNORMAL);
+  const INT_PTR code = reinterpret_cast<INT_PTR>(r);
+  if (code > 32) {
+    SendToJs(L"{\"type\":\"launch-result\",\"ok\":true}");
+  } else {
+    // ShellExecute 的失败码很小（0~32），含义见 SE_ERR_*。最常见的两个单独说清楚。
+    std::wstring why;
+    switch (code) {
+      case 0:  why = L"系统资源不足。"; break;
+      case 2:  why = L"找不到文件。"; break;
+      case 5:  why = L"访问被拒绝，可能被安全软件拦截。"; break;
+      case 31: why = L"无法关联到此类型的文件。"; break;
+      case 32: why = L"关联的程序不存在。"; break;
+      default: why = L"错误码 " + std::to_wstring(code) + L"。"; break;
+    }
+    SendToJs(L"{\"type\":\"launch-result\",\"ok\":false,\"message\":\"启动失败：" + why +
+             L"请到 " + JsonEscape(installDir) + L" 手动运行 LxAI.exe。\"}");
+  }
+}
+
 void StartInstall(const std::wstring& requestedDir) {
   if (g_installing.exchange(true)) return;  // 防连点：已经在装了就别再起一个
 
@@ -409,6 +468,8 @@ HRESULT OnWebMessageReceived(ICoreWebView2* /*sender*/, ICoreWebView2WebMessageR
              L",\"defaultDir\":\"" + JsonEscape(DefaultInstallDir()) + L"\"}");
   } else if (type == L"start-install") {
     StartInstall(ExtractJsonString(msg, L"dir"));
+  } else if (type == L"launch-app") {
+    LaunchInstalledApp(ExtractJsonString(msg, L"dir"));
   } else if (type == L"browse-dir") {
     BrowseForInstallDir(ExtractJsonString(msg, L"dir"));
   } else if (type == L"open-url") {
@@ -595,6 +656,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
     if (SUCCEEDED(comHr)) CoUninitialize();
     return 1;
   }
+  ApplyWindowIcon(g_hwnd, uiFile);
   InitWebView2(g_hwnd, uiFile);
 
   // ── 消息循环 ──
@@ -606,6 +668,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
 
   g_webview.Reset();
   g_controller.Reset();
+  if (g_iconSmall) DestroyIcon(g_iconSmall);
+  if (g_iconBig) DestroyIcon(g_iconBig);
   if (SUCCEEDED(comHr)) CoUninitialize();
   return 0;
 }

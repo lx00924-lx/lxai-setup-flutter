@@ -45,12 +45,44 @@ std::wstring Widen(const std::string& s) {
 constexpr double kCopyBegin = 0.05;
 constexpr double kCopyEnd = 0.95;
 
+/// 素材里的相对路径 → 安装目录里的相对路径。
+///
+/// ⚠️ **`app\` 要铺平到安装根目录**，这是本项目最容易搞错的一处映射：
+///
+/// | 素材里 | 装完之后 |
+/// | :--- | :--- |
+/// | `app\LxAI.exe` | `{app}\LxAI.exe` |
+/// | `app\data\app.so` | `{app}\data\app.so` |
+/// | `python\python.exe` | `{app}\python\python.exe` |
+/// | `NOTICE` | `{app}\NOTICE` |
+///
+/// 为什么不能照搬相对结构：App 起来之后按 `{自己所在目录}\python\python.exe` 找内置运行时
+/// （见 `BridgeProcessManager._resolvePythonExecutable()`）。要是装成 `{app}\app\LxAI.exe`，
+/// 它就会去找 `{app}\app\python\python.exe` —— 那儿什么都没有，于是"桥接起不来"。
+/// 目标布局与旧 Inno 版保持一致，也正是为了原地覆盖升级。
+///
+/// 返回空串表示"映射到了安装根目录本身"（只可能是 `app` 这个目录项）。
+std::wstring MapToTarget(const std::wstring& relative) {
+  constexpr size_t kPrefixLen = 4;  // "app\"
+  if (relative.size() >= kPrefixLen &&
+      _wcsnicmp(relative.c_str(), L"app\\", kPrefixLen) == 0) {
+    return relative.substr(kPrefixLen);
+  }
+  if (_wcsicmp(relative.c_str(), L"app") == 0) return L"";
+  return relative;
+}
+
 }  // namespace
 
 bool PayloadLooksComplete(const std::wstring& payloadDir) {
   if (payloadDir.empty()) return false;
   return FileExists(JoinPath(payloadDir, kMarkerAppExe)) &&
          FileExists(JoinPath(payloadDir, kMarkerPythonExe));
+}
+
+std::wstring AppExePath(const std::wstring& installDir) {
+  if (installDir.empty()) return L"";
+  return JoinPath(installDir, L"LxAI.exe");
 }
 
 bool MeasurePayload(const std::wstring& payloadDir, int& fileCount, unsigned long long& totalBytes) {
@@ -198,23 +230,26 @@ InstallResult RunInstall(const InstallOptions& options, const ProgressFn& onProg
     std::error_code entryEc;
     const fs::path src = it->path();
 
-    if (it->is_directory(entryEc)) {
-      const fs::path rel = fs::relative(src, fs::path(options.payloadDir), entryEc);
-      if (entryEc) continue;
-      std::error_code mkEc;
-      fs::create_directories(fs::path(options.installDir) / rel, mkEc);
-      continue;
-    }
-    if (!it->is_regular_file(entryEc)) continue;
-
     std::error_code relEc;
     const fs::path rel = fs::relative(src, fs::path(options.payloadDir), relEc);
     if (relEc) {
+      if (it->is_directory(entryEc)) continue;
       result.error = L"无法计算相对路径：" + src.wstring();
       return result;
     }
 
-    const fs::path dst = fs::path(options.installDir) / rel;
+    // 素材结构 → 目标结构（`app\` 铺平到根）。别省这一步，理由见 MapToTarget。
+    const std::wstring mapped = MapToTarget(rel.wstring());
+    if (mapped.empty()) continue;  // 就是 `app` 目录本身，对应安装根目录，已经在前面建过了
+
+    if (it->is_directory(entryEc)) {
+      std::error_code mkEc;
+      fs::create_directories(fs::path(options.installDir) / mapped, mkEc);
+      continue;
+    }
+    if (!it->is_regular_file(entryEc)) continue;
+
+    const fs::path dst = fs::path(options.installDir) / mapped;
     std::error_code mkEc;
     fs::create_directories(dst.parent_path(), mkEc);
 
@@ -222,7 +257,7 @@ InstallResult RunInstall(const InstallOptions& options, const ProgressFn& onProg
     // 而且失败时给的是 Win32 错误码 —— 报错能报得具体（比如"文件被占用"）。
     if (!CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
       const DWORD err = GetLastError();
-      result.error = L"复制文件失败：" + rel.wstring() + L"\n\n";
+      result.error = L"复制文件失败：" + mapped + L"\n\n";
       if (err == ERROR_SHARING_VIOLATION || err == ERROR_ACCESS_DENIED) {
         result.error +=
             L"文件被占用或没有权限。安装程序已经尝试结束占用安装目录的进程，\n"

@@ -133,6 +133,7 @@ powershell -ExecutionPolicy Bypass -File native\build.ps1   # 拉 SDK → CMake 
 | `native/src/install_engine.{h,cpp}` | **安装引擎**（不依赖 WebView2，可单独测）：素材校验、清理占用、遍历、铺文件、真实进度回报 |
 | `native/src/process_util.{h,cpp}` | **进程清理**：结束"可执行文件住在安装目录里"的进程（覆盖安装前先杀后装） |
 | `native/ui/index.html` | 界面（HTML/CSS/JS）—— **换皮改这里，不用重编译** |
+| `native/ui/app_icon.{png,ico}` | **与 App 同一张脸的图标**：png 给界面用，ico 给窗口/任务栏用 |
 | `native/CMakeLists.txt` | 构建定义（用 WebView2 的**静态** loader，免得附带 DLL） |
 | `native/build.ps1` | 一键构建（nuget 拉 SDK → cmake → msbuild） |
 | `native/tool/screenshot.ps1` | 开发期给窗口截图 / 模拟点击（不随包分发） |
@@ -215,6 +216,49 @@ powershell -ExecutionPolicy Bypass -File native\build.ps1   # 拉 SDK → CMake 
     表现是"检测不到正在运行的进程"，然后复制照样失败（`CanonicalDir` 做这件事）。
 13. **目录太浅就拒绝执行**：安装路径是用户可编辑的输入，`C:\Windows\System32` 这种
     也能填进来。`IsSafeToReap` 要求至少有盘符 + 两级目录，否则一个手滑就是灾难。
+
+**N2 第二部分已完成并实测**（2026-10-04）：**界面与布局对齐成品**。
+
+- ✅ **品牌标识换成真·App 图标**：此前标题栏是 CSS 画的渐变方块、左侧是一颗 🔗 emoji ——
+  和成品 App 不是同一张脸，用户会怀疑自己装的是别的东西。现在标题栏、左侧品牌区、
+  窗口/任务栏/Alt+Tab 三处都用 `native/ui/app_icon.{png,ico}`（与 `flutter_app/assets/icon/`
+  同一份，SHA256 一致）。窗口图标按 `SM_CXICON` / `SM_CXSMICON` 分别取尺寸加载，
+  比"加载一张让系统缩"清晰（16×16 用 256×256 缩出来是糊的）。
+- ✅ **去掉「当前架构 x64 · Win32」一行**：对普通用户是没有信息量的噪音。
+- ✅ **完成页加「启动应用」**（主按钮）+「完成安装」（次按钮，原「关闭」）。
+  启动**刻意不自动关掉安装器** —— 万一 App 起不来（被杀软拦、缺运行库），
+  窗口已经消失的话用户只剩一脸茫然；现在停在原地写清楚成功还是失败。
+  `ShellExecuteW` 的失败码还做了人话翻译（拒绝访问 → "可能被安全软件拦截"）。
+- ✅ **修掉一个会装出"能装不能跑"的映射 bug**：见下面第 14 条。
+
+**实测**（沙箱）：
+
+| 验证项 | 结果 |
+| :--- | :--- |
+| 安装后的目录布局 | ✅ 与旧 Inno 版一致：`{app}\LxAI.exe` + `{app}\data\` + `{app}\python\`，**没有 `{app}\app\` 这一层** |
+| 文件完整性（按新映射比对） | ✅ 155/155 逐字节一致 |
+| 窗口图标 | ✅ `WM_GETICON` 大/小句柄都非 0 |
+| 「启动应用」成功路径 | ✅ 进程真的起来了（用 `cmd.exe` 当替身试的，**没拿真 LxAI.exe 试**），按钮变「已启动」并禁用 |
+| 「启动应用」失败路径 | ✅ 删掉 `LxAI.exe` 后点它 → 红字说明缺哪个文件，按钮保持可点 |
+
+⚠️ **测「启动应用」时必须用替身 exe**：真的 `LxAI.exe` 会读到 `Documents` 里共享的登录态，
+在沙箱里跑起来等于**又开一台电脑端**，会按单点互斥把用户正在用的设备顶下线。
+
+**N2 第二部分新增的坑**：
+
+14. ⚠️ **素材里的 `app\` 必须铺平到安装根目录**，不能照搬相对结构：
+
+    | 素材里 | 装完之后 |
+    | :--- | :--- |
+    | `app\LxAI.exe` | `{app}\LxAI.exe` |
+    | `app\data\app.so` | `{app}\data\app.so` |
+    | `python\python.exe` | `{app}\python\python.exe` |
+
+    为什么：App 起来之后按 **`{自己所在目录}\python\python.exe`** 找内置运行时
+    （`BridgeProcessManager._resolvePythonExecutable()`）。要是装成 `{app}\app\LxAI.exe`，
+    它就会去找 `{app}\app\python\python.exe` —— 那儿什么都没有，症状是"装上去了但桥接起不来"，
+    而且报错离真因很远。目标布局也必须与旧 Inno 版一致，否则原地覆盖升级会留下两份文件。
+    （C++ 版一开始就是照搬相对结构写的，2026-10-04 发现并修正，见 `MapToTarget()`。）
 
 **待办（N2 余下）**：
 
