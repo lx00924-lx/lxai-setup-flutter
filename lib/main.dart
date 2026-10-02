@@ -46,6 +46,13 @@ Future<void> main() async {
   );
 
   await windowManager.waitUntilReadyToShow(options, () async {
+    // ⚠️ 必须在 show 之前调用：**真正去掉窗口边框**。
+    //
+    // `TitleBarStyle.hidden` 只是"不绘制标题栏"，窗口样式里仍然留着 WS_CAPTION 与
+    // WS_THICKFRAME —— 实测外框 820×520、客户区只有 804×512，那圈 16×8 px 就是用户看到的白边；
+    // 更坑的是底部边框自带 8px 的"拖拽调整大小"热区，会把按钮下半部分的点击整个吃掉
+    // （光标也不变成手型）。setAsFrameless 会把样式换成无边框弹窗，两者就一致了。
+    await windowManager.setAsFrameless();
     await windowManager.show();
     await windowManager.focus();
   });
