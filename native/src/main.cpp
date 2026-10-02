@@ -312,7 +312,9 @@ void RunInstallOnWorker(std::wstring payloadDir, std::wstring installDir) {
   if (result.ok) {
     PostToUiThread(L"{\"type\":\"install-done\",\"files\":" +
                    std::to_wstring(result.filesCopied) + L",\"bytes\":" +
-                   std::to_wstring(result.bytesCopied) + L",\"dir\":\"" +
+                   std::to_wstring(result.bytesCopied) + L",\"closed\":" +
+                   std::to_wstring(result.processesClosed) + L",\"closedNames\":\"" +
+                   JsonEscape(result.closedNames) + L"\",\"dir\":\"" +
                    JsonEscape(installDir) + L"\"}");
   } else {
     PostToUiThread(L"{\"type\":\"install-error\",\"message\":\"" +

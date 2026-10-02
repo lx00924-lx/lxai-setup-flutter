@@ -33,6 +33,11 @@ struct InstallResult {
   std::wstring error;        // ok=false 时给用户看的原因（要说人话）
   int filesCopied = 0;
   unsigned long long bytesCopied = 0;
+
+  /// 覆盖安装前自动结束掉的进程数，以及它们的名字（"LxAI.exe、python.exe"）。
+  /// 界面用它告诉用户"刚才为什么闪了一下" —— 静默把人家应用杀掉不是好习惯。
+  int processesClosed = 0;
+  std::wstring closedNames;
 };
 
 using ProgressFn = std::function<void(const InstallProgress&)>;

@@ -6,6 +6,8 @@
 #include <system_error>
 #include <vector>
 
+#include "process_util.h"
+
 namespace lxai {
 
 const wchar_t* const kMarkerAppExe = L"app\\LxAI.exe";
@@ -80,7 +82,7 @@ bool MeasurePayload(const std::wstring& payloadDir, int& fileCount, unsigned lon
 InstallResult RunInstall(const InstallOptions& options, const ProgressFn& onProgress) {
   InstallResult result;
 
-  const auto report = [&](const wchar_t* stage, double value) {
+  const auto report = [&](const std::wstring& stage, double value) {
     if (!onProgress) return;
     InstallProgress p;
     p.stage = stage;
@@ -120,6 +122,40 @@ InstallResult RunInstall(const InstallOptions& options, const ProgressFn& onProg
   if (ec) {
     result.error = L"无法创建安装目录：" + options.installDir + L"\n\n" + Widen(ec.message());
     return result;
+  }
+
+  // ── 覆盖安装：先结束住在安装目录里的进程，再动手 ──
+  //
+  // 与主流安装器（Chrome / VS Code 那类 updater）一致：**先杀后更，不弹窗问**。
+  // 不这么做的后果是实测过的：LxAI 点 X 只是收进托盘、桥接又是独立进程，
+  // 于是 `python\...\speedups.cp313-win_amd64.pyd` 被锁，复制到那儿直接 ACCESS_DENIED，
+  // 用户拿到的是"装了一半的 LxAI"。
+  {
+    const std::vector<std::wstring> running = FindProcessesUnder(options.installDir);
+    if (!running.empty()) {
+      std::wstring names;
+      for (size_t i = 0; i < running.size(); ++i) {
+        if (i > 0) names += L"、";
+        names += running[i];
+      }
+      report(L"正在关闭正在运行的程序…（" + names + L"）", 0.03);
+
+      const ReapResult reap = TerminateProcessesUnder(options.installDir);
+      result.processesClosed = reap.killed;
+      result.closedNames = names;
+
+      // 结束时限（8 秒）在 TerminateProcessesUnder 里已经等过，这里只处理失败的情况：
+      // 结束不掉多半是"它以管理员身份在跑"，而我们是普通权限 —— 这时候瞒着用户继续装
+      // 只会换来一个语焉不详的 ACCESS_DENIED，不如现在就给出能照做的说明。
+      if (reap.failed > 0 && reap.killed == 0) {
+        result.error =
+            L"LxAI 正在运行，但无法自动关闭它。\n\n"
+            L"它可能是以管理员身份启动的，而本安装程序当前不是。\n"
+            L"请手动退出 LxAI（右键任务栏托盘图标 → 退出 LxAI 并停止桥接），或以管理员身份重新运行本安装程序。";
+        return result;
+      }
+      report(L"已关闭正在运行的程序，继续安装…", 0.04);
+    }
   }
 
   // 目标目录至少要能写 —— 装在 Program Files 而没提权时，这里就会失败。
@@ -188,7 +224,10 @@ InstallResult RunInstall(const InstallOptions& options, const ProgressFn& onProg
       const DWORD err = GetLastError();
       result.error = L"复制文件失败：" + rel.wstring() + L"\n\n";
       if (err == ERROR_SHARING_VIOLATION || err == ERROR_ACCESS_DENIED) {
-        result.error += L"文件被占用或没有权限。如果 LxAI 正在运行，请先退出再安装。";
+        result.error +=
+            L"文件被占用或没有权限。安装程序已经尝试结束占用安装目录的进程，\n"
+            L"仍然失败通常是因为它有管理员权限（比如以管理员身份启动过 LxAI）——\n"
+            L"请手动退出它，或右键以管理员身份重新运行本安装程序。";
       } else {
         result.error += L"系统错误码：" + std::to_wstring(err);
       }

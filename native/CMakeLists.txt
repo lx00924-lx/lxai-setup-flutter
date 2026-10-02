@@ -25,6 +25,7 @@ endif()
 add_executable(LxaiSetup WIN32
   src/main.cpp
   src/install_engine.cpp
+  src/process_util.cpp
 )
 
 target_include_directories(LxaiSetup PRIVATE "${WEBVIEW2_DIR}/include")

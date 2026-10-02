@@ -210,7 +210,9 @@
             </div>
             <div class="hint">
               默认装到当前用户的目录（不需要管理员权限，也不会弹 UAC）。
-              要装到 <code>C:\Program Files</code> 需要以管理员身份运行本安装程序。
+              要装到 <code>C:\Program Files</code> 需要以管理员身份运行本安装程序。<br>
+              如果 LxAI 正在运行，安装程序会**先自动关闭它再覆盖安装**（与主流安装器的做法一致），
+              不会弹窗打断你。
             </div>
           </div>
           <div class="card">
@@ -391,9 +393,12 @@
       else if (m.type === 'install-done') {
         $('prog-fill').style.width = '100%';
         $('prog-pct').textContent = '100%';
+        var closedNote = m.closed > 0
+          ? '\n安装前已自动关闭正在运行的程序（' + m.closedNames + '）。'
+          : '';
         $('done-detail').textContent =
           '安装位置：' + (m.dir || installDir) + '\n' +
-          '已铺开 ' + m.files + ' 个文件，共 ' + fmtBytes(m.bytes) + '。';
+          '已铺开 ' + m.files + ' 个文件，共 ' + fmtBytes(m.bytes) + '。' + closedNote;
         showView('view-done', 4);
       }
 

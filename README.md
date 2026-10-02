@@ -130,7 +130,8 @@ powershell -ExecutionPolicy Bypass -File native\build.ps1   # 拉 SDK → CMake 
 | 路径 | 职责 |
 | :--- | :--- |
 | `native/src/main.cpp` | 宿主：环境检测、无边框窗口、WebView2 初始化、JS 桥、安装流程调度 |
-| `native/src/install_engine.{h,cpp}` | **安装引擎**（不依赖 WebView2，可单独测）：素材校验、遍历、铺文件、真实进度回报 |
+| `native/src/install_engine.{h,cpp}` | **安装引擎**（不依赖 WebView2，可单独测）：素材校验、清理占用、遍历、铺文件、真实进度回报 |
+| `native/src/process_util.{h,cpp}` | **进程清理**：结束"可执行文件住在安装目录里"的进程（覆盖安装前先杀后装） |
 | `native/ui/index.html` | 界面（HTML/CSS/JS）—— **换皮改这里，不用重编译** |
 | `native/CMakeLists.txt` | 构建定义（用 WebView2 的**静态** loader，免得附带 DLL） |
 | `native/build.ps1` | 一键构建（nuget 拉 SDK → cmake → msbuild） |
@@ -181,16 +182,46 @@ powershell -ExecutionPolicy Bypass -File native\build.ps1   # 拉 SDK → CMake 
    两条都写进 `native/tool/screenshot.ps1` 了。
 8. ⚠️ **覆盖安装时，正在运行的 LxAI 会锁住 `python\...\websockets\speedups.cp313-win_amd64.pyd`**，
    `CopyFileW` 返回 `ERROR_ACCESS_DENIED`。实测第一次跑就撞上了（当时目标目录正是机器上
-   **正在用的那份安装**）。**N2 第一件事就是补"检测并关闭正在运行的 LxAI / 桥接"** ——
-   Flutter 版的 M4 有这个步骤，C++ 版还没有。
+   **正在用的那份安装**）。**N2 已修**（见下）。
 
-**待办（N2 起）**：
+**N2 第一部分已完成并实测**（2026-10-04）：**先杀后装，与主流安装器一致。**
 
-1. **覆盖安装前检测并关闭正在运行的 LxAI 与桥接**（上面第 8 条，实测缺口，优先级最高）。
-2. 快捷方式（`IShellLink`）、注册表卸载项、开机自启。
-3. 部署 `{app}\uninstaller\uninstall.exe` + VBS 自毁。
-4. 素材追加进 exe 尾部做成**真单文件**（当前仍读旁边的 `payload\` 目录）。
-5. **UAC 提权**（`ShellExecuteEx` + `runas`），让「装到 Program Files」真正可用。
+- ✅ **覆盖安装前自动结束占用安装目录的进程**（`process_util.cpp`），不弹窗问。
+  判据是 **`ExecutablePath` 落在安装目录之下**，不是进程名 —— 详见 `docs` 式的两条铁律注释。
+  界面在进度条上显示「正在关闭正在运行的程序…（LxAI.exe、python.exe）」，完成页也会写明
+  刚才关了谁 —— **静默把人家应用杀掉不是好习惯**，做了什么得让用户看得见。
+- ✅ **实测**（沙箱内还原现场）：把素材铺进 `_uitest\Programs\LxAI`，再起一个
+  `{沙箱}\python\python.exe` 真的加载住那个 `.pyd`（用 `[IO.File]::Open(...,'Write','None')`
+  确认过锁存在），然后跑安装器：
+
+  | 验证项 | 结果 |
+  | :--- | :--- |
+  | 沙箱里持有锁的进程 | ✅ 已被结束 |
+  | 机器上**同名但不同目录**的桥接 `python.exe` | ✅ 存活（证明判据是路径不是名字） |
+  | 用户的 `LxAI.exe` | ✅ 存活 |
+  | 文件完整性 | ✅ 155/155 逐字节一致 |
+
+**N2 新增的坑（别再踩）**：
+
+9. **`TerminateProcess` 是异步的**：调完就返回，进程还没死透、文件句柄还没释放，
+   紧接着 `CopyFileW` 照样 `ACCESS_DENIED`。必须 `WaitForSingleObject` 到它真的退出
+   （本实现整体最多等 8 秒，且用 `WaitForMultipleObjects` 并发等）。
+10. **排除调用者自己**：卸载器就住在 `{app}\uninstaller\` 里，它按这个规则清理时会把自己
+    也结束掉 —— 用户看到的是"卸载到一半窗口凭空消失"。按 PID 排除，不是按路径。
+11. **"住在安装目录下"要按目录边界比对**：`C:\LxAI` 不能匹配到 `C:\LxAI-Backup\...`，
+    所以比对完前缀还要确认下一个字符是 `\`（`HasPrefixNoCase`）。
+12. **路径要归一化再比**：用户可能填 8.3 短名（`C:\PROGRA~1\LxAI`）或带 `..`，而
+    `QueryFullProcessImageNameW` 给回的一定是完整长路径 —— 不归一化就永远比不中，
+    表现是"检测不到正在运行的进程"，然后复制照样失败（`CanonicalDir` 做这件事）。
+13. **目录太浅就拒绝执行**：安装路径是用户可编辑的输入，`C:\Windows\System32` 这种
+    也能填进来。`IsSafeToReap` 要求至少有盘符 + 两级目录，否则一个手滑就是灾难。
+
+**待办（N2 余下）**：
+
+1. 快捷方式（`IShellLink`）、注册表卸载项、开机自启。
+2. 部署 `{app}\uninstaller\uninstall.exe` + VBS 自毁（卸载器自己也要走一遍"先杀后卸"）。
+3. 素材追加进 exe 尾部做成**真单文件**（当前仍读旁边的 `payload\` 目录）。
+4. **UAC 提权**（`ShellExecuteEx` + `runas`），让「装到 Program Files」真正可用。
 
 ## ⚠️ 开发期注意
 
@@ -213,7 +244,8 @@ powershell -ExecutionPolicy Bypass -File native\build.ps1   # 拉 SDK → CMake 
   # 默认安装目录变成 _uitest\Programs\LxAI
   ```
 
-- 真要往真实目录装，**先把 LxAI 与桥接退干净**（N2 之后安装器会自己处理这一步）。
+- 真要往真实目录装也不用手动退 LxAI 了：**N2 起安装器会自己先把它们结束掉**（先杀后装）。
+  但**测试仍然建议用沙箱** —— 毕竟它会关掉你正在用的应用。
 
 ## 许可
 
