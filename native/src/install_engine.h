@@ -21,6 +21,11 @@ extern const wchar_t* const kMarkerPythonExe;   // python\python.exe
 struct InstallOptions {
   std::wstring payloadDir;   // 素材目录（N3 之后会变成"从 exe 尾部解出来的临时目录"）
   std::wstring installDir;   // 目标安装目录
+
+  // ── 装完之后在系统里留下的东西（界面上的三个开关）──
+  bool desktopIcon = true;    // 桌面快捷方式
+  bool startMenuIcon = true;  // 开始菜单快捷方式
+  bool autoStart = false;     // 开机自启（默认关：不打招呼就开机自启是很讨嫌的行为）
 };
 
 struct InstallProgress {
@@ -38,6 +43,10 @@ struct InstallResult {
   /// 界面用它告诉用户"刚才为什么闪了一下" —— 静默把人家应用杀掉不是好习惯。
   int processesClosed = 0;
   std::wstring closedNames;
+
+  /// 系统集成的结果，用来在完成页如实汇报（建了几个快捷方式、有没有登记开机自启）。
+  int shortcutsCreated = 0;
+  bool autoStartSet = false;
 };
 
 using ProgressFn = std::function<void(const InstallProgress&)>;

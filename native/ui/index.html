@@ -129,6 +129,14 @@
   .path-row input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-soft)}
   .hint{margin-top:7px;font-size:11.5px;color:var(--text-faint);line-height:1.6}
 
+  /* 选项开关。用原生 checkbox + accent-color，不自己画一套 ——
+     系统控件在 High Contrast 等辅助模式下自动正确，自绘的往往忘掉这些。 */
+  .sw{display:flex;align-items:flex-start;gap:9px;padding:6px 0;
+    font-size:12.5px;color:var(--text-main);cursor:pointer;user-select:none}
+  .sw input{width:15px;height:15px;margin-top:1px;flex:0 0 15px;
+    accent-color:var(--primary);cursor:pointer}
+  .sw em{font-style:normal;color:var(--text-faint);font-size:11.5px}
+
   /* 进度 */
   .prog-wrap{margin-top:26px}
   .prog-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px}
@@ -256,6 +264,15 @@
             <div class="hint">
               默认装到当前用户的目录，不需要管理员权限、不会弹 UAC，也不需要手动退出 LxAI。
             </div>
+          </div>
+          <div class="card">
+            <h3>安装选项</h3>
+            <label class="sw"><input type="checkbox" id="sw-desktop" checked>
+              <span>创建桌面快捷方式</span></label>
+            <label class="sw"><input type="checkbox" id="sw-startmenu" checked>
+              <span>创建开始菜单快捷方式</span></label>
+            <label class="sw"><input type="checkbox" id="sw-autostart">
+              <span>开机自动启动<em>（开机后收进托盘，不弹窗口）</em></span></label>
           </div>
           <div class="card">
             <h3>将要安装的内容</h3>
@@ -396,7 +413,7 @@
           $('btn-quick').disabled = false;
           $('btn-custom').disabled = false;
           $('welcome-hint').textContent =
-            '快速安装将使用默认位置' + (sizeText ? '（' + sizeText + '）' : '');
+            '快速安装将使用默认位置，并创建桌面快捷方式' + (sizeText ? '（' + sizeText + '）' : '');
         } else {
           $('welcome-warn').style.display = 'flex';
           $('welcome-hint').textContent = '安装包不完整，无法继续';
@@ -418,12 +435,16 @@
       else if (m.type === 'install-done') {
         $('prog-fill').style.width = '100%';
         $('prog-pct').textContent = '100%';
-        var closedNote = m.closed > 0
-          ? '\n安装前已自动关闭正在运行的程序（' + m.closedNames + '）。'
-          : '';
+        // 如实汇报"在系统里留下了什么"。静默建快捷方式、静默登记开机自启
+        // 都不是好习惯 —— 用户得能自己核对。
+        var notes = [];
+        if (m.shortcuts > 0) notes.push('已创建 ' + m.shortcuts + ' 个快捷方式');
+        if (m.autostart) notes.push('已设置开机自动启动');
+        if (m.closed > 0) notes.push('安装前已自动关闭正在运行的程序（' + m.closedNames + '）');
         $('done-detail').textContent =
           '安装位置：' + (m.dir || installDir) + '\n' +
-          '已铺开 ' + m.files + ' 个文件，共 ' + fmtBytes(m.bytes) + '。' + closedNote;
+          '已铺开 ' + m.files + ' 个文件，共 ' + fmtBytes(m.bytes) + '。' +
+          (notes.length ? '\n' + notes.join('；') + '。' : '');
         showView('view-done', 4);
       }
 
@@ -463,8 +484,11 @@
   $('btn-close').onclick = function () { send('close'); };
 
   /* ── 导航 ── */
-  /// 进"正在安装"页并复位进度条。快速安装与自定义安装走的是同一条路，
-  /// 差别只在用不用默认目录 —— 所以抽出来，免得两处各写一遍忘了一处。
+  // 进"正在安装"页并复位进度条。快速安装与自定义安装走的是同一条路，
+  // 差别只在用不用默认目录、经不经过选项页 —— 所以抽出来，免得两处各写一遍忘了一处。
+  //
+  // 三个开关**两条路径都读**：走快速安装时它们还是 HTML 里的默认值
+  // （桌面 ✓、开始菜单 ✓、开机自启 ✗），正是"快速"该有的语义。
   function beginInstall(dir) {
     installDir = dir;
     $('prog-dir').textContent = dir;
@@ -472,7 +496,12 @@
     $('prog-pct').textContent = '0%';
     $('prog-fill').style.width = '0%';
     showView('view-progress', 3);
-    send('start-install', { dir: dir });
+    send('start-install', {
+      dir: dir,
+      desktopIcon: $('sw-desktop').checked,
+      startMenuIcon: $('sw-startmenu').checked,
+      autoStart: $('sw-autostart').checked
+    });
   }
 
   $('btn-quick').onclick = function () { beginInstall(installDir); };

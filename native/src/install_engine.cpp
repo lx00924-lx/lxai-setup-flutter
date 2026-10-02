@@ -7,6 +7,8 @@
 #include <vector>
 
 #include "process_util.h"
+#include "registry.h"
+#include "shortcut.h"
 
 namespace lxai {
 
@@ -40,10 +42,10 @@ std::wstring Widen(const std::string& s) {
   return out;
 }
 
-/// 界面上的进度文案。复制阶段占 0.05~0.95，留头尾给"准备"和"收尾"，
+/// 界面上的进度文案。复制阶段占 0.05~0.88，留头尾给"准备"、"关闭占用进程"和"系统集成"，
 /// 免得进度条一上来就是 100% 然后长时间不动 —— 那种进度条比没有还让人不安。
 constexpr double kCopyBegin = 0.05;
-constexpr double kCopyEnd = 0.95;
+constexpr double kCopyEnd = 0.88;
 
 /// 素材里的相对路径 → 安装目录里的相对路径。
 ///
@@ -285,7 +287,53 @@ InstallResult RunInstall(const InstallOptions& options, const ProgressFn& onProg
     }
   }
 
-  report(L"复制完成。", kCopyEnd);
+  report(L"正在添加系统集成…", kCopyEnd);
+
+  // ── 快捷方式与开机自启 ──
+  //
+  // 失败策略：**快捷方式建不上不中止安装**。文件已经铺好了、App 能跑，
+  // 为了一个桌面图标把整次安装判死，对用户来说是净损失。
+  // 但要如实汇报 —— 完成页会写"已创建 N 个快捷方式"，建了 0 个用户自己能看出来。
+  const std::wstring appExe = AppExePath(options.installDir);
+
+  AppInfo app;
+  const bool hasInfo = ReadAppInfoFromExe(appExe, &app);
+  const std::wstring appName = (hasInfo && !app.productName.empty()) ? app.productName : L"LxAI";
+  const std::wstring description =
+      (hasInfo && !app.fileDescription.empty()) ? app.fileDescription : appName;
+
+  ShortcutSpec spec;
+  spec.target = appExe;
+  spec.workingDir = options.installDir;
+  spec.iconPath = appExe + L",0";
+  spec.description = description;
+
+  if (options.desktopIcon) {
+    const std::wstring dir = DesktopDir(false);
+    if (!dir.empty()) {
+      spec.linkPath = dir + L"\\" + appName + L".lnk";
+      std::wstring ignored;
+      if (CreateShortcut(spec, &ignored)) ++result.shortcutsCreated;
+    }
+  }
+
+  if (options.startMenuIcon) {
+    const std::wstring dir = StartMenuProgramsDir(false);
+    if (!dir.empty()) {
+      spec.linkPath = dir + L"\\" + appName + L".lnk";
+      std::wstring ignored;
+      if (CreateShortcut(spec, &ignored)) ++result.shortcutsCreated;
+    }
+  }
+
+  if (options.autoStart) {
+    report(L"正在设置开机自启…", kCopyEnd + 0.03);
+    // `--minimized`：开机直接弹出主窗口会烦到用户，收进托盘就够了。
+    std::wstring ignored;
+    result.autoStartSet = SetRunAtStartup(appName, L"\"" + appExe + L"\" --minimized", &ignored);
+  }
+
+  report(L"安装完成。", 1.0);
   result.ok = true;
   return result;
 }

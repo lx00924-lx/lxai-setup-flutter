@@ -315,6 +315,53 @@ powershell -ExecutionPolicy Bypass -File native\build.ps1   # 拉 SDK → CMake 
 | 「自定义安装」 | ✅ 进入安装位置页 |
 | 「快速安装」 | ✅ 直接开装（截图抓到 130/155 · 80%），不经过选项页 |
 
+**N2 第五部分已完成并实测**（2026-10-04）：**快捷方式 + 开机自启**。
+
+- ✅ `native/src/shortcut.{h,cpp}` —— 直接用 `IShellLink` + `IPersistFile`，**不走 PowerShell**
+  （Flutter 版走的是 `New-Object -ComObject WScript.Shell`，那是被 Dart 没有原生 COM 逼的）。
+  接口语义与 Flutter 版一致，以后要换实现不用改调用方。
+- ✅ `native/src/registry.{h,cpp}` —— 开机自启直接 `RegCreateKeyExW` / `RegSetValueExW`。
+  删除一律**幂等**（`ERROR_FILE_NOT_FOUND` 算成功）——这条是 2026-10-02 卸载卡死的根因。
+- ✅ 选项页三个开关：创建桌面快捷方式（默认 ✓）、创建开始菜单快捷方式（默认 ✓）、
+  开机自动启动（默认 ✗，且写明"开机后收进托盘，不弹窗口"）。快速安装也读这三个值，
+  此时它们还是默认值 —— 正是"快速"该有的语义。
+- ✅ 应用名/版本/描述**从 App exe 的 VERSIONINFO 里读**，不硬编码：
+  Flutter 构建时会把 `pubspec.yaml` 的版本写进 `Runner.rc` 再编进 exe，
+  所以 App exe 自己就是版本的唯一真相，安装器跟着走就不可能对不上
+  （硬编码的版本号在发版时必然忘记改）。实测读到 `LxAI` / `1.0.1+101` /
+  `LxAI - 私有 Agent 控制中心`。
+- ✅ 完成页如实汇报"在系统里留下了什么"：`已创建 2 个快捷方式；已设置开机自动启动。`
+  **静默建快捷方式、静默登记开机自启都不是好习惯**，用户得能自己核对。
+
+| 验证项 | 结果 |
+| :--- | :--- |
+| 桌面快捷方式 | ✅ 建出来了；目标 / 工作目录 / 图标 / 描述全部正确 |
+| 开始菜单快捷方式 | ✅ 同上 |
+| 开机自启 | ✅ `HKCU\...\Run\LxAI` = `"{app}\LxAI.exe" --minimized` |
+| 完成页汇报 | ✅ `已创建 2 个快捷方式；已设置开机自动启动。` |
+
+⚠️ **测试这一步会真的动到用户机器**（桌面快捷方式、开始菜单、Run 键）。
+本次测试前把用户原有的 `Desktop\LxAI.lnk` 与 Run 值备份到临时目录，测完逐项还原并核对
+（快捷方式目标回到正式安装、字节数一致、Run 值逐字相同、测试新建的开始菜单项删掉）。
+
+**为什么注册表卸载项这次没做**：`UninstallString` 要指向卸载器，而卸载器还没做。
+现在写进去只会得到一个点了没反应的"卸载"按钮，而且会**覆盖掉旧 Inno 版留下的、
+目前还能用的那个条目**。这一块跟卸载器一起做，前置条件是先把界面嵌进 exe
+（否则复制到 `{app}\uninstaller\` 的那份 exe 找不到自己的 `ui\`）。
+
+**N2 第五部分新增的坑**：
+
+17. **桌面目录不能自己拼 `%USERPROFILE%\Desktop`** —— 桌面被重定向到 OneDrive 的机器上
+    拼出来是错的，快捷方式会建到用户根本看不见的地方。要用 `SHGetKnownFolderPath(FOLDERID_Desktop)`。
+    （Flutter 版 `shortcut.dart` 就是这么拼的，属于潜在 bug；C++ 版改对了。）
+18. **COM 要按线程初始化**：安装跑在 worker 线程，主线程的 `CoInitializeEx` 不算数，
+    worker 里直接 `CoCreateInstance` 会返回 `CO_E_NOTINITIALIZED`，症状是"快捷方式一个都没建出来"
+    却看不出原因。另外 `RPC_E_CHANGED_MODE` 时**不能**由我们去 `CoUninitialize`。
+19. **`GetFileVersionInfo` 的语言代码页要从 `\VarFileInfo\Translation` 查**，
+    不能猜 `040904B0` —— 不同工具链写进去的翻译 ID 不一样，猜错了就是"明明有版本信息却读不出来"。
+20. `HKCU` 与 `HKLM` 下 `...\CurrentVersion\Run` 的**路径字符串是一样的**，只有根不同。
+    别照着 Flutter 版的样子写一个带 `allUsers` 参数却返回同一串东西的函数。
+
 **待办（N2 余下）**：
 
 1. 快捷方式（`IShellLink`）、注册表卸载项、开机自启。
@@ -345,6 +392,17 @@ powershell -ExecutionPolicy Bypass -File native\build.ps1   # 拉 SDK → CMake 
 
 - 真要往真实目录装也不用手动退 LxAI 了：**N2 起安装器会自己先把它们结束掉**（先杀后装）。
   但**测试仍然建议用沙箱** —— 毕竟它会关掉你正在用的应用。
+- ⚠️ **但 `LOCALAPPDATA` 沙箱只隔离得了安装目录，隔离不了快捷方式和注册表**：
+  从 N2 第五部分起，安装器会往 `桌面\LxAI.lnk`、`开始菜单\LxAI.lnk`、
+  `HKCU\...\Run\LxAI` 写东西，这些**不受 `LOCALAPPDATA` 影响**，会直接改到本机真实状态。
+  测试前先备份、测完逐项还原并核对：
+
+  ```powershell
+  # 备份
+  Copy-Item "$([Environment]::GetFolderPath('Desktop'))\LxAI.lnk" "$env:TEMP\bak.lnk" -Force
+  (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name LxAI).LxAI
+  # 还原：拷回 .lnk、删掉测试新建的开始菜单项、Set-ItemProperty 写回原值
+  ```
 
 ## 许可
 

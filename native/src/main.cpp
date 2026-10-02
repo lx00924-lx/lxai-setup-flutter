@@ -307,6 +307,26 @@ void SendToJs(const std::wstring& json) {
   if (g_webview) g_webview->PostWebMessageAsJson(json.c_str());
 }
 
+/// 取一个顶层布尔字段。取不到（或形状不对）时用 `fallback`。
+///
+/// 为什么给 fallback 而不是一律 false：这几个开关的**默认值本身是有语义的**
+/// （桌面快捷方式默认建、开机自启默认不建）。前端万一漏传某个字段，
+/// 按"全 false"处理会静默地什么都不建，而且用户看不出来。
+bool ExtractJsonBool(const std::wstring& json, const std::wstring& key, bool fallback) {
+  size_t p = json.find(L"\"" + key + L"\"");
+  if (p == std::wstring::npos) return fallback;
+  p = json.find(L':', p + key.size() + 2);
+  if (p == std::wstring::npos) return fallback;
+
+  size_t i = p + 1;
+  while (i < json.size() && (json[i] == L' ' || json[i] == L'\t')) ++i;
+  if (i >= json.size()) return fallback;
+
+  if (json.compare(i, 4, L"true") == 0) return true;
+  if (json.compare(i, 5, L"false") == 0) return false;
+  return fallback;
+}
+
 /// worker 线程往 UI 线程投递一条 JSON。窗口没了就自己收尸，别泄漏。
 void PostToUiThread(const std::wstring& json) {
   auto* payload = new std::wstring(json);
@@ -318,10 +338,8 @@ void PostToUiThread(const std::wstring& json) {
 
 // ───────────────────────── 安装流程 ─────────────────────────
 
-void RunInstallOnWorker(std::wstring payloadDir, std::wstring installDir) {
-  lxai::InstallOptions options;
-  options.payloadDir = payloadDir;
-  options.installDir = installDir;
+void RunInstallOnWorker(lxai::InstallOptions options) {
+  const std::wstring installDir = options.installDir;
 
   // onProgress 在 worker 线程被高频调用，这里只做"转成 JSON 丢给 UI 线程"这一件事。
   const auto onProgress = [](const lxai::InstallProgress& p) {
@@ -338,7 +356,9 @@ void RunInstallOnWorker(std::wstring payloadDir, std::wstring installDir) {
                    std::to_wstring(result.filesCopied) + L",\"bytes\":" +
                    std::to_wstring(result.bytesCopied) + L",\"closed\":" +
                    std::to_wstring(result.processesClosed) + L",\"closedNames\":\"" +
-                   JsonEscape(result.closedNames) + L"\",\"dir\":\"" +
+                   JsonEscape(result.closedNames) + L"\",\"shortcuts\":" +
+                   std::to_wstring(result.shortcutsCreated) + L",\"autostart\":" +
+                   (result.autoStartSet ? L"true" : L"false") + L",\"dir\":\"" +
                    JsonEscape(installDir) + L"\"}");
   } else {
     PostToUiThread(L"{\"type\":\"install-error\",\"message\":\"" +
@@ -382,7 +402,8 @@ void LaunchInstalledApp(const std::wstring& installDir) {
   }
 }
 
-void StartInstall(const std::wstring& requestedDir) {
+void StartInstall(const std::wstring& requestedDir, bool desktopIcon, bool startMenuIcon,
+                  bool autoStart) {
   if (g_installing.exchange(true)) return;  // 防连点：已经在装了就别再起一个
 
   std::wstring payloadDir;
@@ -395,11 +416,16 @@ void StartInstall(const std::wstring& requestedDir) {
     return;
   }
 
-  const std::wstring installDir = requestedDir.empty() ? DefaultInstallDir() : requestedDir;
+  lxai::InstallOptions options;
+  options.payloadDir = payloadDir;
+  options.installDir = requestedDir.empty() ? DefaultInstallDir() : requestedDir;
+  options.desktopIcon = desktopIcon;
+  options.startMenuIcon = startMenuIcon;
+  options.autoStart = autoStart;
 
   // detach 而不是 join：worker 只通过 PostMessage 与外界通信，窗口在安装期间不会销毁
   // （WM_CLOSE 里挡着），所以生命期是安全的。
-  std::thread(RunInstallOnWorker, payloadDir, installDir).detach();
+  std::thread(RunInstallOnWorker, options).detach();
 }
 
 /// 让用户挑安装目录。用现代的 IFileOpenDialog（`FOS_PICKFOLDERS`），
@@ -467,7 +493,10 @@ HRESULT OnWebMessageReceived(ICoreWebView2* /*sender*/, ICoreWebView2WebMessageR
              L",\"measured\":" + (measured ? L"true" : L"false") +
              L",\"defaultDir\":\"" + JsonEscape(DefaultInstallDir()) + L"\"}");
   } else if (type == L"start-install") {
-    StartInstall(ExtractJsonString(msg, L"dir"));
+    // 三个开关没传时用"快速安装"的语义兜底（桌面建、开始菜单建、自启不建）
+    StartInstall(ExtractJsonString(msg, L"dir"), ExtractJsonBool(msg, L"desktopIcon", true),
+                 ExtractJsonBool(msg, L"startMenuIcon", true),
+                 ExtractJsonBool(msg, L"autoStart", false));
   } else if (type == L"launch-app") {
     LaunchInstalledApp(ExtractJsonString(msg, L"dir"));
   } else if (type == L"browse-dir") {
