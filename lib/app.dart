@@ -193,7 +193,15 @@ class _SetupShellState extends State<SetupShell> {
 
       if (_runAfterInstall) {
         try {
-          await Process.start(plan.appExe, const [], mode: ProcessStartMode.detached);
+          await Process.start(
+            plan.appExe,
+            const [],
+            mode: ProcessStartMode.detached,
+            // ⚠️ 必须指定工作目录：不指定的话子进程继承**安装器**的当前目录，
+            //    而 App 会按工作目录判断"应用目录"、把 lxai_bridge.py 释放到那里 ——
+            //    实测把脚本写进了安装器工程根目录，而 {app}\lxai_bridge.py 始终是缺的。
+            workingDirectory: plan.installDir,
+          );
           _log.add('已启动 ${plan.appExe}');
         } catch (e) {
           _log.add('启动失败（不影响安装）：$e');
