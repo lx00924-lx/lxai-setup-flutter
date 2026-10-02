@@ -58,3 +58,6 @@ windows/flutter/generated_plugins.cmake
 # 单文件安装包的构建中间物与产物（不入库）
 /payload.zip
 /output/
+# 原生安装器：WebView2 SDK 与构建产物不入库
+/native/third_party/
+/native/build/

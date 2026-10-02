@@ -16,6 +16,12 @@
 **未完成：M3（单文件打包 / 提权分支）与 M5（代码签名 / 对接自更新）**，见下方「里程碑」与
 「单文件安装包」两节。
 
+> 🔀 **2026-10-04：单文件这条路上，已决定改走原生方案。**
+> 上面这套 Flutter 版**暂时保留可用**（它把安装逻辑都写清楚了，是原生版的行为参照），
+> 但不再往"单文件"方向投入 —— Flutter 的 exe 做不到自带运行时。
+> 新的原生安装器在 [`native/`](./native/)（**C++ + WebView2**，N0 已完成）：
+> 单 exe、零运行时依赖、界面用 HTML/CSS 写。详见下方「原生版」一节。
+
 ## 跑起来
 
 ```powershell
@@ -108,6 +114,47 @@ powershell -File tool\build-payload.ps1   # 把 App 产物 + 私有 Python 铺�
 「为所有用户安装」开关目前**只改了安装路径与注册表分支（HKLM）**，
 **没有实际做 UAC 提权**（没有 `ShellExecuteEx` + `runas`）。所以非管理员勾它，
 写 `Program Files` / HKLM 会失败。要做 M3 时一并补上。
+
+## 原生版（`native/`）：C++ + WebView2 —— 这是往后的主线
+
+**为什么换**：Flutter 版做不成单文件（必须带 28 MB 运行时），而"一个 exe 双击即装"是发布形态的硬要求。
+原生方案体积几乎只剩素材本身（~22–26 MB），界面还能用 HTML/CSS 写。
+
+分工：**C++ 管安装逻辑，WebView2 只负责渲染界面**。两者靠 `postMessage` 传 JSON。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File native\build.ps1   # 拉 SDK → CMake → MSBuild
+# 产物：native\build\Release\LxAI-Setup.exe（当前 76 KB）
+```
+
+| 路径 | 职责 |
+| :--- | :--- |
+| `native/src/main.cpp` | 宿主：环境检测、无边框窗口、WebView2 初始化、JS 桥 |
+| `native/ui/index.html` | 界面（HTML/CSS/JS）—— **换皮改这里，不用重编译** |
+| `native/CMakeLists.txt` | 构建定义（用 WebView2 的**静态** loader，免得附带 DLL） |
+| `native/build.ps1` | 一键构建（nuget 拉 SDK → cmake → msbuild） |
+
+**N0 已完成并实测**（2026-10-04）：
+
+- ✅ **环境检测 + 缺 WebView2 弹提示**：用官方 `GetAvailableCoreWebView2BrowserVersionString`
+  探测；缺了弹一个带"打开官方下载页"出路的对话框（不是甩一句"缺少组件"就退）。
+  用环境变量 `LXAI_SETUP_FORCE_NO_WEBVIEW2=1` 可以复现这条分支 —— WebView2 装上了就没法方便卸掉，
+  而这个兜底恰恰最该实测。
+- ✅ **无边框窗口 + HTML/CSS 界面**渲染正常（820×620，与 Flutter 版同尺寸）。
+- ✅ **双向桥已通**：界面显示 C++ 探测回传的 `WebView2 运行时 154.0.4258.48`，
+  标题栏拖动/最小化/关闭都经桥交给 C++ 执行。
+
+**踩过的坑（别再踩）**：
+
+1. `postMessage({对象})` 在 WebView2 里是**按 JSON 投递**，C++ 侧必须用
+   **`get_WebMessageAsJson`**；用 `TryGetWebMessageAsString` 只会静默失败 —— 表现是"桥完全没反应"，
+   不报任何错。
+2. 内层 lambda 访问外层 lambda 的捕获变量时**必须写进捕获列表**（`[uiFile]`），
+   写 `[]` 会报 C2326「函数无法访问 uiFile」。
+3. `ShellExecuteW` 要 `#include <shellapi.h>`；`/utf-8` 必须开，否则 MSVC 按 GBK 解源文件，中文全乱码。
+
+**待办（N1 起）**：把 Flutter 版那套安装逻辑（解包、铺文件、快捷方式、注册表、卸载器、VBS 自毁）
+用 C++ 重写 → 界面按 Flutter 版四步向导复刻 → 素材追加进 exe 尾部做成单文件 → 补 UAC 提权。
 
 ## ⚠️ 开发期注意
 

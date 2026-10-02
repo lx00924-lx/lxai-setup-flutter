@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>LxAI 安装程序</title>
+<style>
+  /* ─────────────────────────────────────────────────────────────
+     这一整份界面就是"自定义 UI"的落点：
+     换背景图、挪控件位置、改配色，全部在这份 HTML/CSS 里，**不用重编译 exe**。
+     配色与 Flutter 版（native/../lib/theme/brand.dart）、App 图标同源。
+     ───────────────────────────────────────────────────────────── */
+  :root{
+    --primary:#0284C7; --primary-dark:#0369A1;
+    --deep-a:#0C1D32; --deep-b:#133351;
+    --text-main:#0F172A; --text-muted:#64748B; --text-faint:#94A3B8;
+    --border:#E2E8F0; --ok:#16A34A; --warn:#F59E0B;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden}
+  body{
+    font-family:"Microsoft YaHei","Segoe UI",system-ui,sans-serif;
+    color:var(--text-main); background:#fff;
+    display:flex; flex-direction:column;
+  }
+
+  /* 自绘标题栏：无边框窗口的系统标题栏由 C++ 去掉了，这里补回来 */
+  .titlebar{
+    height:48px; flex:0 0 48px; display:flex; align-items:center;
+    background:linear-gradient(135deg,var(--deep-a),var(--deep-b));
+    color:#fff; -webkit-user-select:none; user-select:none; cursor:default;
+  }
+  .titlebar .logo{width:22px;height:22px;margin:0 10px 0 14px;border-radius:6px;
+    background:linear-gradient(135deg,#38BDF8,#0284C7);}
+  .titlebar .title{font-size:13px;font-weight:600;letter-spacing:.3px}
+  .titlebar .spacer{flex:1}
+  .titlebar button{
+    width:46px;height:48px;border:0;background:transparent;color:#fff;
+    font-size:15px;cursor:pointer;line-height:48px;
+  }
+  .titlebar button:hover{background:rgba(255,255,255,.12)}
+  .titlebar button.close:hover{background:#E81123}
+
+  .body{flex:1;display:flex;min-height:0}
+
+  /* 左侧品牌区 */
+  .brand{
+    width:248px;flex:0 0 248px;position:relative;overflow:hidden;
+    background:linear-gradient(135deg,var(--deep-a),var(--deep-b));
+    color:#fff;padding:34px 24px;display:flex;flex-direction:column;
+  }
+  .brand::after{ /* 那团光晕：纯 CSS，任意分辨率都清晰 */
+    content:"";position:absolute;inset:-40% -20% auto -20%;height:70%;
+    background:radial-gradient(closest-side,rgba(125,211,252,.30),rgba(2,132,199,.08),transparent);
+    pointer-events:none;
+  }
+  .brand .mark{width:92px;height:92px;border-radius:24px;margin-bottom:26px;
+    background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);
+    display:flex;align-items:center;justify-content:center;font-size:34px}
+  .brand h1{font-size:30px;font-weight:800;letter-spacing:.5px}
+  .brand .sub{margin-top:6px;font-size:13px;color:#93C5FD}
+  .brand ul{margin-top:26px;list-style:none;display:flex;flex-direction:column;gap:10px}
+  .brand li{font-size:12.5px;color:rgba(255,255,255,.86);padding-left:16px;position:relative}
+  .brand li::before{content:"";position:absolute;left:0;top:7px;width:5px;height:5px;
+    border-radius:50%;background:var(--primary)}
+  .brand .ver{margin-top:auto;font-size:11px;color:rgba(255,255,255,.45)}
+
+  /* 右侧内容区 */
+  .content{flex:1;min-width:0;padding:32px 40px 24px;display:flex;flex-direction:column;overflow:auto}
+  h2{font-size:20px;font-weight:700}
+  .lead{margin-top:6px;font-size:12.5px;color:var(--text-muted)}
+
+  .card{margin-top:20px;border:1px solid var(--border);border-radius:10px;padding:16px 18px}
+  .card h3{font-size:13px;font-weight:700;margin-bottom:10px}
+  .row{display:flex;align-items:center;gap:10px;font-size:12.5px;padding:5px 0}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--text-faint);flex:0 0 8px}
+  .dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)}
+  .k{color:var(--text-muted);min-width:132px}
+  .v{font-family:Consolas,monospace;color:var(--text-main)}
+  .muted{color:var(--text-faint);font-size:11.5px;margin-top:8px;line-height:1.6}
+
+  .actions{margin-top:auto;padding-top:18px;display:flex;gap:10px;justify-content:flex-end}
+  button.btn{padding:9px 18px;border-radius:8px;border:1px solid var(--border);
+    background:#fff;font-size:12.5px;font-family:inherit;cursor:pointer}
+  button.btn:hover{background:#F8FAFC}
+  button.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+  button.primary:hover{background:var(--primary-dark)}
+</style>
+</head>
+<body>
+
+  <!-- 无边框窗口的自绘标题栏：拖拽/最小化/关闭都经 JS → C++ 桥发过去 -->
+  <div class="titlebar" id="titlebar">
+    <div class="logo"></div>
+    <div class="title">LxAI 安装程序</div>
+    <div class="spacer"></div>
+    <button id="btn-min" title="最小化">&#x2500;</button>
+    <button id="btn-close" class="close" title="关闭">&#x2715;</button>
+  </div>
+
+  <div class="body">
+    <aside class="brand">
+      <div class="mark">&#x1F517;</div>
+      <h1>LxAI</h1>
+      <div class="sub">私有 Agent 远程遥控</div>
+      <ul>
+        <li>手机远程指挥电脑上的 Agent</li>
+        <li>无需公网 IP，扫码即连</li>
+        <li>聊天记录与密钥都留在本机</li>
+      </ul>
+      <div class="ver">原生宿主 N0 · C++ + WebView2</div>
+    </aside>
+
+    <main class="content">
+      <h2>环境检查</h2>
+      <div class="lead">安装前先确认这台机器具备运行条件。</div>
+
+      <div class="card">
+        <h3>宿主与界面通道</h3>
+        <div class="row"><span class="dot" id="d-bridge"></span>
+          <span class="k">WebView2 界面层</span><span class="v" id="v-bridge">正在等待宿主回包…</span></div>
+        <div class="row"><span class="dot" id="d-ver"></span>
+          <span class="k">WebView2 运行时</span><span class="v" id="v-ver">—</span></div>
+        <div class="row"><span class="dot ok"></span>
+          <span class="k">当前架构</span><span class="v" id="v-arch">—</span></div>
+        <div class="muted">
+          本页是 HTML/CSS，由 C++ 宿主加载。换背景、挪位置改这份文件即可，不用重编译 exe。<br>
+          上面两行是 C++ → JS 回包的真实结果，说明双向通道已打通。
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="btn" id="btn-close2">取消</button>
+        <button class="btn primary" id="btn-next">下一步（测试桥）</button>
+      </div>
+    </main>
+  </div>
+
+<script>
+  // ── 与 C++ 宿主的桥：postMessage 发 JSON，宿主回 PostWebMessageAsJson ──
+  const host = window.chrome && window.chrome.webview ? window.chrome.webview : null;
+
+  function send(type, extra) {
+    if (!host) return;
+    host.postMessage(Object.assign({ type: type }, extra || {}));
+  }
+
+  if (!host) {
+    // 直接用浏览器打开本文件时会走到这里 —— 不是错误，只是没有宿主
+    document.getElementById('v-bridge').textContent = '未检测到宿主（浏览器里直接打开）';
+    document.getElementById('d-bridge').className = 'dot warn';
+  } else {
+    /* 宿主回包 */
+    host.addEventListener('message', function (e) {
+      const m = e.data || {};
+      if (m.type === 'host-info') {
+        document.getElementById('v-bridge').textContent = '已连通（C++ 宿主在线）';
+        document.getElementById('d-bridge').className = 'dot ok';
+        document.getElementById('v-ver').textContent = m.webview2 || '未知';
+        document.getElementById('d-ver').className = 'dot ok';
+        document.getElementById('v-arch').textContent =
+          (navigator.userAgent.match(/x64|WOW64|Win64/) ? 'x64' : 'x86') + ' · ' + navigator.platform;
+      }
+    });
+    /* 告诉宿主"页面好了，把环境信息发过来" */
+    send('ready');
+  }
+
+  /* 标题栏交互：全部经桥交给 C++ 去执行系统级操作 */
+  document.getElementById('titlebar').addEventListener('mousedown', function (e) {
+    if (e.target.tagName === 'BUTTON') return;
+    send('drag-window');
+  });
+  document.getElementById('btn-min').onclick   = function () { send('minimize'); };
+  document.getElementById('btn-close').onclick = function () { send('close'); };
+  document.getElementById('btn-close2').onclick= function () { send('close'); };
+  document.getElementById('btn-next').onclick  = function () {
+    send('ready'); // 再问一次，肉眼确认往返都通
+  };
+</script>
+</body>
+</html>
