@@ -109,10 +109,15 @@
 
   .actions{padding-top:16px;display:flex;gap:10px;justify-content:flex-end;align-items:center;flex:0 0 auto}
   /* 左侧那行小字（快速安装会装到哪儿）—— 用 margin-right:auto 顶到最左边，
-     这样按钮仍然整齐地靠右，符合用户对安装向导的预期。 */
-  .actions-hint{margin-right:auto;font-size:11.5px;color:var(--text-faint);line-height:1.5}
+     这样按钮仍然整齐地靠右，符合用户对安装向导的预期。
+     `min-width:0` 是让它在空间不够时**优先收缩并换行**，而不是去挤按钮。 */
+  .actions-hint{margin-right:auto;min-width:0;font-size:11.5px;color:var(--text-faint);line-height:1.5}
   button.btn{padding:9px 18px;border-radius:8px;border:1px solid var(--border);
-    background:#fff;font-size:12.5px;font-family:inherit;cursor:pointer;transition:background .15s}
+    background:#fff;font-size:12.5px;font-family:inherit;cursor:pointer;transition:background .15s;
+    /* ⚠️ 必须禁止收缩并禁止换行：`.actions` 是 flex 行，左侧那行小字一长，
+       按钮就会被压成两行（"自定义安/装"、"快速安/装"）—— 实测踩过。
+       文字按钮的宽度是它自己的事，不该由旁边的说明文字决定。 */
+    flex:0 0 auto;white-space:nowrap}
   button.btn:hover{background:#F8FAFC}
   button.btn[disabled]{opacity:.45;cursor:not-allowed}
   button.primary{background:var(--primary);border-color:var(--primary);color:#fff}
@@ -412,8 +417,12 @@
           // 而不是等用户点了"快速安装"才报错 —— 那时候他已经在期待进度条了。
           $('btn-quick').disabled = false;
           $('btn-custom').disabled = false;
-          $('welcome-hint').textContent =
-            '快速安装将使用默认位置，并创建桌面快捷方式' + (sizeText ? '（' + sizeText + '）' : '');
+          // 用 innerHTML 而不是 textContent：想让"体积"单独占一行，
+          // 免得被断成"（155 / 个文件 · 56.2 MB）"这种难看的折行。
+          // 拼进去的全是数字与固定文案，没有外部输入，不存在注入问题。
+          $('welcome-hint').innerHTML =
+            '快速安装将使用默认位置，并创建桌面快捷方式' +
+            (sizeText ? '<br>' + sizeText : '');
         } else {
           $('welcome-warn').style.display = 'flex';
           $('welcome-hint').textContent = '安装包不完整，无法继续';
