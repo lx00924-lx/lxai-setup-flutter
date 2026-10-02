@@ -37,7 +37,15 @@ class Brand {
   static const double brandPanelWidth = 248;
 
   /// 窗口尺寸（国内大厂安装器常见区间：别做全屏，也别小到内容挤）
-  static const Size windowSize = Size(820, 520);
+  ///
+  /// ⚠️ 高度 620 是被**选项页的实际内容**顶上去的，不是随手写的：
+  /// 标题栏占 48，剩下的才是内容区；而"协议 + 安装位置 + 5 个附加任务开关 + 按钮行"
+  /// 实测需要 520 出头。原先 520 高时最后两个开关和「开始安装」被挤出可视区 ——
+  /// 中间虽然做了滚动，但**首次安装的人不知道要滚**，等于按钮不存在（用户实测反馈）。
+  /// 所以宁可窗口高一点，也要让所有选项一屏可见；滚动只作为"以后再加选项"的兜底。
+  ///
+  /// 再加附加任务时：每行约 41px，先确认 620 还放得下，放不下就同步调大这里。
+  static const Size windowSize = Size(820, 620);
 
   static const LinearGradient deepGradient = LinearGradient(
     begin: Alignment.topLeft,
