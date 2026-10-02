@@ -24,6 +24,7 @@ endif()
 # WIN32 = 子系统设为 WINDOWS：双击不弹控制台黑框。安装器最忌讳闪一个终端窗口出来。
 add_executable(LxaiSetup WIN32
   src/main.cpp
+  src/install_engine.cpp
 )
 
 target_include_directories(LxaiSetup PRIVATE "${WEBVIEW2_DIR}/include")

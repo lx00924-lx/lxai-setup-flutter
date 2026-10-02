@@ -129,10 +129,12 @@ powershell -ExecutionPolicy Bypass -File native\build.ps1   # 拉 SDK → CMake 
 
 | 路径 | 职责 |
 | :--- | :--- |
-| `native/src/main.cpp` | 宿主：环境检测、无边框窗口、WebView2 初始化、JS 桥 |
+| `native/src/main.cpp` | 宿主：环境检测、无边框窗口、WebView2 初始化、JS 桥、安装流程调度 |
+| `native/src/install_engine.{h,cpp}` | **安装引擎**（不依赖 WebView2，可单独测）：素材校验、遍历、铺文件、真实进度回报 |
 | `native/ui/index.html` | 界面（HTML/CSS/JS）—— **换皮改这里，不用重编译** |
 | `native/CMakeLists.txt` | 构建定义（用 WebView2 的**静态** loader，免得附带 DLL） |
 | `native/build.ps1` | 一键构建（nuget 拉 SDK → cmake → msbuild） |
+| `native/tool/screenshot.ps1` | 开发期给窗口截图 / 模拟点击（不随包分发） |
 
 **N0 已完成并实测**（2026-10-04）：
 
@@ -144,6 +146,19 @@ powershell -ExecutionPolicy Bypass -File native\build.ps1   # 拉 SDK → CMake 
 - ✅ **双向桥已通**：界面显示 C++ 探测回传的 `WebView2 运行时 154.0.4258.48`，
   标题栏拖动/最小化/关闭都经桥交给 C++ 执行。
 
+**N1 已完成并实测**（2026-10-04）：**它现在真的会装东西了。**
+
+- ✅ **安装引擎**（`install_engine.cpp`）：素材完整性校验（缺 `app\LxAI.exe` / `python\python.exe`
+  就明确报缺什么）→ 统计文件数与总字节 → **写权限预探测**（没权限在动手前就说清楚，
+  而不是铺了一半才失败）→ 逐文件 `CopyFileW` → 按 1% 步长回报进度。
+- ✅ **四步向导界面**：环境检查 → 安装选项 → 正在安装 → 完成，外加一个出错页。
+  左侧步骤指示器跟着走；素材不全时「下一步」**直接禁用**，不让用户走到最后才碰壁。
+- ✅ **安装位置可改**：默认 `%LOCALAPPDATA%\Programs\LxAI`（当前用户，不弹 UAC），
+  带「浏览…」按钮走系统 `IFileOpenDialog`。
+- ✅ **实测结果**：155 个文件 / 56.2 MB → 目标目录**逐字节比对 155/155 一致**，无残留探针文件。
+  进度页实拍在 `150 / 155 · 92%`（延迟 250 ms 抓的），确认是**逐文件真实回报**而不是估算动画。
+- ✅ 体积 **137.5 KB**（N0 是 76 KB）—— 安装逻辑只花了几十 KB，界面照旧不占体积。
+
 **踩过的坑（别再踩）**：
 
 1. `postMessage({对象})` 在 WebView2 里是**按 JSON 投递**，C++ 侧必须用
@@ -152,16 +167,53 @@ powershell -ExecutionPolicy Bypass -File native\build.ps1   # 拉 SDK → CMake 
 2. 内层 lambda 访问外层 lambda 的捕获变量时**必须写进捕获列表**（`[uiFile]`），
    写 `[]` 会报 C2326「函数无法访问 uiFile」。
 3. `ShellExecuteW` 要 `#include <shellapi.h>`；`/utf-8` 必须开，否则 MSVC 按 GBK 解源文件，中文全乱码。
+4. **worker 线程不能直接 `PostWebMessageAsJson`** —— WebView2 只允许在**创建它的线程**上调用。
+   安装跑在后台线程，必须 `PostMessage(WM_APP+n)` 把 JSON 丢回 UI 线程再发（本项目的做法见
+   `kMsgFromWorker`）。直接调不会报错，是静默失效。
+5. **Windows 路径里的 `\` 不转义就会生成非法 JSON**（`"C:\LxAI"` 的 `\L` 是非法转义），
+   JS 那边 `JSON.parse` 抛异常 → 症状是"进度条一动不动"，而 C++ 侧一切正常、毫无错误。
+   凡是往界面送路径的地方都必须过一遍 `JsonEscape`。
+6. `std::error_code::message()` 是**窄字符串**（本机是 GBK），和 `std::wstring` 相加编译不过；
+   要按 `CP_ACP` 转宽（不能用 UTF-8，中文系统错误信息会乱码）。
+7. **截图调试**：`FindWindow(null, "标题")` 对本安装器窗口**恒返回 0**（`GetWindowTextW` 读出来
+   逐字符相同也找不到），要用 `Process.MainWindowHandle`；而 `SetForegroundWindow` 会被系统的
+   前台锁拦掉，截出来是别的窗口盖在上面 —— 得**临时置顶**（`SetWindowPos(HWND_TOPMOST)`）再截。
+   两条都写进 `native/tool/screenshot.ps1` 了。
+8. ⚠️ **覆盖安装时，正在运行的 LxAI 会锁住 `python\...\websockets\speedups.cp313-win_amd64.pyd`**，
+   `CopyFileW` 返回 `ERROR_ACCESS_DENIED`。实测第一次跑就撞上了（当时目标目录正是机器上
+   **正在用的那份安装**）。**N2 第一件事就是补"检测并关闭正在运行的 LxAI / 桥接"** ——
+   Flutter 版的 M4 有这个步骤，C++ 版还没有。
 
-**待办（N1 起）**：把 Flutter 版那套安装逻辑（解包、铺文件、快捷方式、注册表、卸载器、VBS 自毁）
-用 C++ 重写 → 界面按 Flutter 版四步向导复刻 → 素材追加进 exe 尾部做成单文件 → 补 UAC 提权。
+**待办（N2 起）**：
+
+1. **覆盖安装前检测并关闭正在运行的 LxAI 与桥接**（上面第 8 条，实测缺口，优先级最高）。
+2. 快捷方式（`IShellLink`）、注册表卸载项、开机自启。
+3. 部署 `{app}\uninstaller\uninstall.exe` + VBS 自毁。
+4. 素材追加进 exe 尾部做成**真单文件**（当前仍读旁边的 `payload\` 目录）。
+5. **UAC 提权**（`ShellExecuteEx` + `runas`），让「装到 Program Files」真正可用。
 
 ## ⚠️ 开发期注意
 
 自研安装器与机器上装的 LxAI 是**同一个 App**（共用卸载项 GUID
 `{8CC1E567-9691-46FF-914C-B7A24B230C39}`，所以自研版能原地覆盖 Inno 版）。
-测试真安装逻辑时如需隔离，请用独立的注册表键与安装目录（例如
-`LxAI-Dev` / `%LOCALAPPDATA%\Programs\LxAI-Dev`），避免影响正式安装的那一份。
+
+**测试真安装逻辑时务必先隔离目标目录**，否则会打到你自己天天在用的那一份安装上。
+2026-10-04 实测踩过：N1 第一次跑用的是默认目录 `%LOCALAPPDATA%\Programs\LxAI`，
+而那里**正装着一份在运行的 LxAI**（`LxAI.exe` + `python.exe lxai_bridge.py` 连着生产中继），
+复制到 `websockets\speedups.cp313-win_amd64.pyd` 时被占用而失败。
+
+- 事后逐文件核对：那 155 个文件**本来就存在且逐字节相同**（`{app}\app\` 与根目录的 Flutter 产物
+  本来就是同一份副本），所以**实际什么都没改**；但这是运气，不是设计。
+- 现在的做法：用改过的 `LOCALAPPDATA` 启动安装器，默认目录就会落进沙箱，
+  不用去点输入框改路径：
+
+  ```powershell
+  $env:LOCALAPPDATA = 'F:\ai\flutter\lxai-setup-flutter\_uitest'
+  Start-Process native\build\Release\LxAI-Setup.exe
+  # 默认安装目录变成 _uitest\Programs\LxAI
+  ```
+
+- 真要往真实目录装，**先把 LxAI 与桥接退干净**（N2 之后安装器会自己处理这一步）。
 
 ## 许可
 

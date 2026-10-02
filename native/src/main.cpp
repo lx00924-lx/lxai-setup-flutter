@@ -1,4 +1,5 @@
-// LxAI Windows 安装器 —— 原生宿主（N0：环境检测 + 无边框窗口 + WebView2 + 双向桥）
+// LxAI Windows 安装器 —— 原生宿主（N0：环境检测 + 无边框窗口 + WebView2 + 双向桥；
+//                                   N1：接上真实安装引擎 + 真实进度）
 //
 // 分工：**C++ 负责安装逻辑，WebView2 负责界面**。
 // 界面用 HTML/CSS 写（native/ui/），换背景、挪控件位置改 HTML 即可，不用重编译。
@@ -8,13 +9,18 @@
 //    所以**启动第一件事就是检测**，缺了要给用户一条能走通的路，不能白屏或闪退。
 
 #include <windows.h>
-#include <shellapi.h>  // ShellExecuteW：缺 WebView2 时打开官方下载页要用
+#include <shellapi.h>      // ShellExecuteW：缺 WebView2 时打开官方下载页要用
+#include <shobjidl_core.h> // IFileOpenDialog：选安装目录
 #include <wrl.h>
 #include <WebView2.h>
 
+#include <atomic>
 #include <cstdlib>  // _wdupenv_s / free
 #include <string>
+#include <thread>
 #include <vector>
+
+#include "install_engine.h"
 
 using Microsoft::WRL::Callback;
 using Microsoft::WRL::ComPtr;
@@ -27,6 +33,9 @@ HWND g_hwnd = nullptr;
 ComPtr<ICoreWebView2Controller> g_controller;
 ComPtr<ICoreWebView2> g_webview;
 
+/// 安装是否正在后台跑。用来挡住"装到一半用户点了 X"。
+std::atomic<bool> g_installing{false};
+
 constexpr wchar_t kWindowClass[] = L"LxAI_Setup_Native_Wnd";
 constexpr wchar_t kWindowTitle[] = L"LxAI 安装程序";
 
@@ -37,6 +46,13 @@ constexpr int kClientHeight = 620;
 
 /// WebView2 运行时（Evergreen）的官方引导器地址。检测不到时引导用户去装。
 constexpr wchar_t kWebView2BootstrapperUrl[] = L"https://go.microsoft.com/fwlink/p/?LinkId=2124703";
+
+/// 后台线程 → UI 线程的自定义消息。
+///
+/// ⚠️ 为什么必须绕这一圈：**WebView2 的 `PostWebMessageAsJson` 只能在创建它的线程上调用**
+///    （这里是 UI 线程）。安装引擎跑在 worker 线程上，直接调会静默失效甚至崩。
+///    约定：lParam 是 `new std::wstring(json)`，由 UI 线程接管并 delete。
+constexpr UINT kMsgFromWorker = WM_APP + 1;
 
 // ───────────────────────── 小工具 ─────────────────────────
 
@@ -55,14 +71,52 @@ std::wstring ParentDir(const std::wstring& path) {
   return pos == std::wstring::npos ? std::wstring() : path.substr(0, pos);
 }
 
+/// 环境变量，取不到就返回 fallback。
+std::wstring EnvVar(const wchar_t* name, const std::wstring& fallback) {
+  wchar_t* raw = nullptr;
+  size_t len = 0;
+  if (_wdupenv_s(&raw, &len, name) != 0 || raw == nullptr) return fallback;
+  std::wstring value(raw);
+  free(raw);
+  return value.empty() ? fallback : value;
+}
+
+/// 把字符串转义成能塞进 JSON 字面量的形式。
+///
+/// ⚠️ Windows 路径里全是反斜杠，**不转义就会生成非法 JSON**（`"C:\LxAI"` 里的 `\L` 是
+///    非法转义），JS 那边 `JSON.parse` 直接抛异常 —— 症状是"进度条一动不动"，
+///    而且 C++ 侧看不出任何错。这条是必须做的事，不是可选的美化。
+std::wstring JsonEscape(const std::wstring& s) {
+  std::wstring out;
+  out.reserve(s.size() + 16);
+  for (const wchar_t c : s) {
+    switch (c) {
+      case L'\\': out += L"\\\\"; break;
+      case L'"':  out += L"\\\""; break;
+      case L'\n': out += L"\\n";  break;
+      case L'\r': out += L"\\r";  break;
+      case L'\t': out += L"\\t";  break;
+      default:
+        if (c < 0x20) {
+          wchar_t buf[8];
+          swprintf_s(buf, L"\\u%04x", static_cast<unsigned>(c));
+          out += buf;
+        } else {
+          out += c;
+        }
+    }
+  }
+  return out;
+}
+
 /// 从 exe 所在目录**逐级向上**找 ui\index.html。
 ///
 /// 为什么逐级向上：开发期 exe 在 native\build\Release\ 里，而 ui\ 在 native\ 下；
-/// 正式打包时 ui 会被塞进 exe 内部（N1 再做）。逐级找能让开发期直接跑起来。
-bool FindUiFile(std::wstring& outPath) {
+/// 正式打包时 ui 会被塞进 exe 内部（N3 再做）。逐级找能让开发期直接跑起来。
+bool FindUpwards(const wchar_t* relative, std::wstring& outPath, int maxLevels = 6) {
   std::wstring dir = ParentDir(ExeDir());
-  for (int i = 0; i < 6 && !dir.empty(); ++i) {
-    const std::wstring candidate = dir + L"\\ui\\index.html";
+  for (int i = 0; i < maxLevels && !dir.empty(); ++i) {
+    const std::wstring candidate = dir + L"\\" + relative;
     if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) {
       outPath = candidate;
       return true;
@@ -70,6 +124,27 @@ bool FindUiFile(std::wstring& outPath) {
     dir = ParentDir(dir);
   }
   return false;
+}
+
+/// 素材目录：同样逐级向上找 `payload\`（判据是里面真有 `app\LxAI.exe`）。
+///
+/// N3 之后这里会先变成"从 exe 尾部解出来的临时目录"，但对调用方来说接口不变。
+bool FindPayloadDir(std::wstring& outDir) {
+  std::wstring probe;
+  if (!FindUpwards(L"payload\\app\\LxAI.exe", probe)) return false;
+  // 去掉尾巴上的 app\LxAI.exe，留下 payload 目录本身
+  outDir = ParentDir(ParentDir(probe));
+  return true;
+}
+
+/// 默认安装位置：**当前用户**的 `%LOCALAPPDATA%\Programs\LxAI`。
+///
+/// 为什么默认选用户目录而不是 Program Files：装 Program Files 必须提权，
+/// 而一个还没做完 UAC 流程的安装器默认弹管理员对话框，只会让用户一脸问号地取消。
+/// 等 N4 把提权做完整了，「为所有用户安装」再作为可选项出现。
+std::wstring DefaultInstallDir() {
+  const std::wstring local = EnvVar(L"LOCALAPPDATA", ExeDir());
+  return local + L"\\Programs\\LxAI";
 }
 
 // ───────────────────────── WebView2 环境检测 ─────────────────────────
@@ -150,8 +225,8 @@ void BeginWindowDrag(HWND hwnd) {
 
 /// 解析 JS 发来的最小 JSON：只认 `{"type":"xxx"}` 这一种形状。
 ///
-/// N0 刻意不引第三方 JSON 库：现在的消息只有"命令"没有负载，
-/// 手写一个小提取器足够，也省得为它去拉依赖。等真需要传结构化数据时再换。
+/// N0 刻意不引第三方 JSON 库，N1 也还不需要 —— 现在多了一个"安装目录"字符串负载，
+/// 下面 `ExtractJsonString` 就能拿。等真需要传嵌套结构时再换库。
 std::wstring ExtractJsonType(const std::wstring& json) {
   const std::wstring key = L"\"type\"";
   size_t p = json.find(key);
@@ -165,8 +240,138 @@ std::wstring ExtractJsonType(const std::wstring& json) {
   return json.substr(p + 1, end - p - 1);
 }
 
+/// 取一个顶层字符串字段的值，顺便处理 `\\` `\"` `\n` 这些转义。
+/// 找不到对应 key 时返回空串（调用方据此走默认值）。
+std::wstring ExtractJsonString(const std::wstring& json, const std::wstring& key) {
+  size_t p = json.find(L"\"" + key + L"\"");
+  if (p == std::wstring::npos) return L"";
+  p = json.find(L':', p + key.size() + 2);
+  if (p == std::wstring::npos) return L"";
+  p = json.find(L'"', p);
+  if (p == std::wstring::npos) return L"";
+  ++p;
+
+  std::wstring out;
+  for (size_t i = p; i < json.size(); ++i) {
+    const wchar_t c = json[i];
+    if (c == L'\\' && i + 1 < json.size()) {
+      const wchar_t n = json[++i];
+      switch (n) {
+        case L'n': out += L'\n'; break;
+        case L'r': out += L'\r'; break;
+        case L't': out += L'\t'; break;
+        case L'u': {
+          // \uXXXX：这里只可能来自我们自己 JsonEscape 出去的路径，按 BMP 直接还原
+          if (i + 4 < json.size()) {
+            const std::wstring hex = json.substr(i + 1, 4);
+            out += static_cast<wchar_t>(wcstoul(hex.c_str(), nullptr, 16));
+            i += 4;
+          }
+          break;
+        }
+        default: out += n;
+      }
+      continue;
+    }
+    if (c == L'"') break;
+    out += c;
+  }
+  return out;
+}
+
 void SendToJs(const std::wstring& json) {
   if (g_webview) g_webview->PostWebMessageAsJson(json.c_str());
+}
+
+/// worker 线程往 UI 线程投递一条 JSON。窗口没了就自己收尸，别泄漏。
+void PostToUiThread(const std::wstring& json) {
+  auto* payload = new std::wstring(json);
+  if (g_hwnd == nullptr || !PostMessageW(g_hwnd, kMsgFromWorker, 0,
+                                         reinterpret_cast<LPARAM>(payload))) {
+    delete payload;
+  }
+}
+
+// ───────────────────────── 安装流程 ─────────────────────────
+
+void RunInstallOnWorker(std::wstring payloadDir, std::wstring installDir) {
+  lxai::InstallOptions options;
+  options.payloadDir = payloadDir;
+  options.installDir = installDir;
+
+  // onProgress 在 worker 线程被高频调用，这里只做"转成 JSON 丢给 UI 线程"这一件事。
+  const auto onProgress = [](const lxai::InstallProgress& p) {
+    wchar_t buf[64];
+    swprintf_s(buf, L"%.4f", p.value);
+    PostToUiThread(L"{\"type\":\"progress\",\"stage\":\"" + JsonEscape(p.stage) +
+                   L"\",\"value\":" + buf + L"}");
+  };
+
+  const lxai::InstallResult result = lxai::RunInstall(options, onProgress);
+
+  if (result.ok) {
+    PostToUiThread(L"{\"type\":\"install-done\",\"files\":" +
+                   std::to_wstring(result.filesCopied) + L",\"bytes\":" +
+                   std::to_wstring(result.bytesCopied) + L",\"dir\":\"" +
+                   JsonEscape(installDir) + L"\"}");
+  } else {
+    PostToUiThread(L"{\"type\":\"install-error\",\"message\":\"" +
+                   JsonEscape(result.error) + L"\"}");
+  }
+  g_installing = false;
+}
+
+void StartInstall(const std::wstring& requestedDir) {
+  if (g_installing.exchange(true)) return;  // 防连点：已经在装了就别再起一个
+
+  std::wstring payloadDir;
+  if (!FindPayloadDir(payloadDir)) {
+    g_installing = false;
+    PostToUiThread(
+        L"{\"type\":\"install-error\",\"message\":\"找不到安装素材目录 payload。\\n\\n"
+        L"开发期请把 exe 放在仓库内运行（素材在 native\\\\..\\\\payload）；\\n"
+        L"正式分发包请确认 exe 完整、未被安全软件拆分。\"}");
+    return;
+  }
+
+  const std::wstring installDir = requestedDir.empty() ? DefaultInstallDir() : requestedDir;
+
+  // detach 而不是 join：worker 只通过 PostMessage 与外界通信，窗口在安装期间不会销毁
+  // （WM_CLOSE 里挡着），所以生命期是安全的。
+  std::thread(RunInstallOnWorker, payloadDir, installDir).detach();
+}
+
+/// 让用户挑安装目录。用现代的 IFileOpenDialog（`FOS_PICKFOLDERS`），
+/// 而不是 `SHBrowseForFolder` —— 后者的界面是 Windows 95 时代的树控件，观感掉档。
+void BrowseForInstallDir(const std::wstring& current) {
+  ComPtr<IFileOpenDialog> dialog;
+  if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                              IID_PPV_ARGS(&dialog)))) {
+    return;
+  }
+
+  DWORD options = 0;
+  dialog->GetOptions(&options);
+  dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+  dialog->SetTitle(L"选择 LxAI 的安装位置");
+
+  if (!current.empty()) {
+    ComPtr<IShellItem> item;
+    if (SUCCEEDED(SHCreateItemFromParsingName(current.c_str(), nullptr, IID_PPV_ARGS(&item)))) {
+      dialog->SetFolder(item.Get());
+    }
+  }
+
+  if (dialog->Show(g_hwnd) != S_OK) return;  // 用户取消
+
+  ComPtr<IShellItem> picked;
+  if (FAILED(dialog->GetResult(&picked))) return;
+  LPWSTR path = nullptr;
+  if (FAILED(picked->GetDisplayName(SIGDN_FILESYSPATH, &path)) || path == nullptr) return;
+  const std::wstring chosen(path);
+  CoTaskMemFree(path);
+
+  SendToJs(L"{\"type\":\"install-dir\",\"dir\":\"" + JsonEscape(chosen) + L"\"}");
 }
 
 HRESULT OnWebMessageReceived(ICoreWebView2* /*sender*/, ICoreWebView2WebMessageReceivedEventArgs* args) {
@@ -183,8 +388,30 @@ HRESULT OnWebMessageReceived(ICoreWebView2* /*sender*/, ICoreWebView2WebMessageR
   if (type == L"ready") {
     // 页面就绪：把宿主侧的环境信息回给界面，顺便证明 C++ → JS 这条方向也通
     std::wstring ver;
-    ProbeWebView2(ver);
-    SendToJs(L"{\"type\":\"host-info\",\"webview2\":\"" + ver + L"\",\"ok\":true}");
+    const bool hasWebView2 = ProbeWebView2(ver);
+
+    std::wstring payloadDir;
+    const bool hasPayload = FindPayloadDir(payloadDir);
+
+    int fileCount = 0;
+    unsigned long long totalBytes = 0;
+    const bool measured = hasPayload && lxai::MeasurePayload(payloadDir, fileCount, totalBytes);
+
+    SendToJs(L"{\"type\":\"host-info\",\"webview2\":\"" + JsonEscape(ver) +
+             L"\",\"ok\":true,\"hasWebView2\":" + (hasWebView2 ? L"true" : L"false") +
+             L",\"payloadDir\":\"" + JsonEscape(payloadDir) +
+             L"\",\"payloadOk\":" + (hasPayload ? L"true" : L"false") +
+             L",\"payloadFiles\":" + std::to_wstring(fileCount) +
+             L",\"payloadBytes\":" + std::to_wstring(totalBytes) +
+             L",\"measured\":" + (measured ? L"true" : L"false") +
+             L",\"defaultDir\":\"" + JsonEscape(DefaultInstallDir()) + L"\"}");
+  } else if (type == L"start-install") {
+    StartInstall(ExtractJsonString(msg, L"dir"));
+  } else if (type == L"browse-dir") {
+    BrowseForInstallDir(ExtractJsonString(msg, L"dir"));
+  } else if (type == L"open-url") {
+    const std::wstring url = ExtractJsonString(msg, L"url");
+    if (!url.empty()) ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
   } else if (type == L"drag-window") {
     if (g_hwnd) BeginWindowDrag(g_hwnd);
   } else if (type == L"close") {
@@ -199,16 +426,9 @@ HRESULT OnWebMessageReceived(ICoreWebView2* /*sender*/, ICoreWebView2WebMessageR
 
 std::wstring UserDataDir() {
   // 放在 %LOCALAPPDATA% 下：不要往 exe 旁边写（安装器可能在只读目录里跑）
-  wchar_t* base = nullptr;
-  size_t len = 0;
-  std::wstring dir;
-  if (_wdupenv_s(&base, &len, L"LOCALAPPDATA") == 0 && base) {
-    dir = std::wstring(base) + L"\\LxAI-Setup\\WebView2";
-    free(base);
-  } else {
-    dir = ExeDir() + L"\\.webview2";
-  }
-  return dir;
+  const std::wstring local = EnvVar(L"LOCALAPPDATA", L"");
+  if (!local.empty()) return local + L"\\LxAI-Setup\\WebView2";
+  return ExeDir() + L"\\.webview2";
 }
 
 void InitWebView2(HWND hwnd, const std::wstring& uiFile) {
@@ -277,6 +497,16 @@ void InitWebView2(HWND hwnd, const std::wstring& uiFile) {
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
+    case kMsgFromWorker: {
+      // worker 线程投过来的 JSON，所有权已转移到这里
+      std::wstring* payload = reinterpret_cast<std::wstring*>(lParam);
+      if (payload) {
+        SendToJs(*payload);
+        delete payload;
+      }
+      return 0;
+    }
+
     case WM_SIZE:
       if (g_controller) {
         RECT rc{};
@@ -290,6 +520,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       return 0;
 
     case WM_CLOSE:
+      // 装到一半被关掉 = 用户得到一个"半个程序"，而且不会有任何提示。
+      // 与其让它发生，不如让用户等这几秒。
+      if (g_installing.load()) {
+        MessageBoxW(hwnd,
+                    L"正在安装，请等待当前步骤完成后再关闭。",
+                    L"LxAI 安装程序", MB_ICONINFORMATION | MB_OK);
+        return 0;
+      }
       if (g_controller) g_controller->Close();
       DestroyWindow(hwnd);
       return 0;
@@ -347,7 +585,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
 
   // ── 第 3 步：起 WebView2 并加载界面 ──
   std::wstring uiFile;
-  if (!FindUiFile(uiFile)) {
+  if (!FindUpwards(L"ui\\index.html", uiFile)) {
     MessageBoxW(g_hwnd,
                 L"找不到界面文件（ui\\index.html）。\n"
                 L"开发期请从仓库根目录运行 native\\build.ps1 生成后再跑。",

@@ -61,3 +61,6 @@ windows/flutter/generated_plugins.cmake
 # 原生安装器：WebView2 SDK 与构建产物不入库
 /native/third_party/
 /native/build/
+
+# 安装器自测沙箱（用改过的 LOCALAPPDATA 启动时默认目录会落进这里）
+/_uitest/
