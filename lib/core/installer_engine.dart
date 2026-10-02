@@ -182,7 +182,7 @@ class InstallerEngine {
       displayVersion: _versionOf(plan),
       publisher: 'lx00924-lx',
       installLocation: '${plan.installDir}\\',
-      uninstallString: '"${plan.installDir}\\uninstaller\\${_selfName()}" --uninstall',
+      uninstallString: '"${uninstallerPath(plan)}" --uninstall',
       displayIcon: plan.appExe,
       estimatedSizeKb: sizeKb,
       allUsers: plan.allUsers,
@@ -267,6 +267,10 @@ class InstallerEngine {
   /// 为什么要连运行时一起复制：Flutter 的 Windows exe **不能单独运行**，
   /// 必须连带 `data\app.so`、`flutter_windows.dll` 等；而 `{app}\data\` 里装的是
   /// **App 自己**的 Dart 代码，卸载器放进去会启动成 App。所以只能自带一份，代价约 20 MB。
+  ///
+  /// 复制完把 exe **改名成 `uninstall.exe`**：以前保持原名 `lxai_setup.exe`，
+  /// 用户进这个目录看到"setup"会以为它是安装器 —— 实测就有人双击它，
+  /// 结果弹出**安装向导**（没带 `--uninstall` 就是安装模式）。名字得说人话。
   static Future<int> _placeUninstaller(InstallPlan plan) async {
     final self = File(Platform.resolvedExecutable);
     final selfDir = self.parent;
@@ -292,8 +296,29 @@ class InstallerEngine {
         count += await _copyDir(e, Directory('${target.path}\\data'));
       }
     }
+
+    // 改名成 uninstall.exe：让"这个目录里的哪个文件是卸载器"一眼可见。
+    // 失败也不致命（下面注册表用的是最终名，所以这里失败要回退成原名）。
+    try {
+      final from = File('${target.path}\\${_basename(self.path)}');
+      final to = File('${target.path}\\$kUninstallerExeName');
+      if (from.existsSync()) {
+        if (to.existsSync()) to.deleteSync();
+        from.renameSync(to.path);
+      }
+    } catch (e) {
+      InstallLog.write('卸载器改名失败（继续用原名）：$e');
+    }
+
     return count;
   }
+
+  /// 部署后的卸载器文件名。注册表与"自动进卸载模式"的判定都用它。
+  static const String kUninstallerExeName = 'uninstall.exe';
+
+  /// 部署后的卸载器绝对路径。
+  static String uninstallerPath(InstallPlan plan) =>
+      '${plan.installDir}\\uninstaller\\$kUninstallerExeName';
 
   static Future<int> _copyDir(Directory from, Directory to) async {
     var n = 0;
@@ -355,8 +380,6 @@ class InstallerEngine {
     }
     return h.toRadixString(16).padLeft(8, '0');
   }
-
-  static String _selfName() => _basename(Platform.resolvedExecutable);
 
   /// 目标盘的可用空间（拿不到就返回 null，不做硬性阻拦）
   static int? _freeSpaceOf(String dir) {

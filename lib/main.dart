@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:win32/win32.dart';
 import 'package:window_manager/window_manager.dart';
@@ -23,6 +25,22 @@ bool _hasFlag(String flag) {
   }
 }
 
+/// 当前这个 exe 是不是"装完以后被部署到 `{app}\uninstaller\` 的那一份"。
+///
+/// 为什么要判断：**用户会直接双击它**。以前那份 exe 叫 `lxai_setup.exe` 且不带
+/// `--uninstall`，双击的结果是弹出**安装向导**（用户实测报过："这个目录我点击是安装啊"）。
+/// 所以只要发现自己住在 `uninstaller\` 里，就默认按卸载模式走 —— 双击就该是卸载。
+///
+/// 开发期从 `build\windows\x64\runner\Release\` 直接跑不受影响（那个目录不叫 uninstaller）。
+bool _isDeployedUninstaller() {
+  try {
+    final dir = File(Platform.resolvedExecutable).parent.path.toLowerCase();
+    return dir.endsWith(r'\uninstaller');
+  } catch (_) {
+    return false;
+  }
+}
+
 /// LxAI 安装器入口。
 ///
 /// 窗口策略：**无边框 + 固定尺寸 + 居中** —— 安装器不该让用户拖动/缩放（大厂都这么做，
@@ -31,7 +49,9 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await windowManager.ensureInitialized();
 
-  final mode = _hasFlag('--uninstall') ? SetupMode.uninstall : SetupMode.install;
+  final mode = (_hasFlag('--uninstall') || _isDeployedUninstaller())
+      ? SetupMode.uninstall
+      : SetupMode.install;
   final silent = _hasFlag('--silent');
   final purgeData = _hasFlag('--purge-data');
 

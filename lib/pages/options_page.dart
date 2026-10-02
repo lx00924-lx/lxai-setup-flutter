@@ -112,7 +112,7 @@ class _OptionsPageState extends State<OptionsPage> {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(40, 34, 40, 26),
+      padding: const EdgeInsets.fromLTRB(40, 30, 40, 22),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -129,96 +129,113 @@ class _OptionsPageState extends State<OptionsPage> {
             '选择安装位置与附加任务，也可以直接下一步',
             style: TextStyle(fontSize: 12.5, color: Brand.textMuted),
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
 
-          // ── 协议 ──────────────────────────────────────────────
-          Row(
-            children: [
-              _CheckBox(
-                value: widget.agreed,
-                onChanged: widget.onAgreedChanged,
-              ),
-              const SizedBox(width: 9),
-              const Text('我已阅读并同意', style: TextStyle(fontSize: 12.5, color: Brand.textMain)),
-              LinkButton('《用户协议》', () {}),
-              const Text('与', style: TextStyle(fontSize: 12.5, color: Brand.textMain)),
-              LinkButton('《隐私政策》', () {}),
-            ],
-          ),
-          const SizedBox(height: 20),
-
-          // ── 安装位置 ──────────────────────────────────────────
-          const _SectionLabel('安装位置'),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: SizedBox(
-                  height: 38,
-                  child: TextField(
-                    controller: _dirCtrl,
-                    onChanged: widget.onDirChanged,
-                    style: const TextStyle(fontSize: 12.5, color: Brand.textMain),
-                    decoration: InputDecoration(
-                      isDense: true,
-                      contentPadding:
-                          const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
-                      filled: true,
-                      fillColor: Colors.white,
-                      enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(Brand.radiusSm),
-                        borderSide: const BorderSide(color: Brand.border),
+          // ⚠️ 中间这块必须**可滚动**，按钮行固定在底部。
+          //
+          // 为什么：窗口是固定 820×520（安装器不让拖大），而附加任务每加一行，
+          // 内容就往上顶一截 —— 之前用 `Spacer()` 把按钮行推到最下面，内容一超高
+          // 按钮就被挤出可视区，用户"看不到安装按钮"（实测报过）。
+          // 改成 Expanded + SingleChildScrollView 之后，无论加多少选项，
+          // 按钮永远钉在底部，多出来的内容自己滚。
+          Expanded(
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // ── 协议 ──────────────────────────────────────────────
+                  Row(
+                    children: [
+                      _CheckBox(
+                        value: widget.agreed,
+                        onChanged: widget.onAgreedChanged,
                       ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(Brand.radiusSm),
-                        borderSide: const BorderSide(color: Brand.primary, width: 1.4),
-                      ),
-                    ),
+                      const SizedBox(width: 9),
+                      const Text('我已阅读并同意', style: TextStyle(fontSize: 12.5, color: Brand.textMain)),
+                      LinkButton('《用户协议》', () {}),
+                      const Text('与', style: TextStyle(fontSize: 12.5, color: Brand.textMain)),
+                      LinkButton('《隐私政策》', () {}),
+                    ],
                   ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              GhostButton(
-                label: '浏览',
-                width: 68,
-                onTap: _browse,
-              ),
-            ],
-          ),
-          const SizedBox(height: 22),
+                  const SizedBox(height: 16),
 
-          // ── 附加任务 ──────────────────────────────────────────
-          const _SectionLabel('附加任务'),
-          const SizedBox(height: 4),
-          _SwitchRow(
-            value: widget.desktopIcon,
-            onChanged: widget.onDesktopIconChanged,
-            label: '创建桌面快捷方式',
-          ),
-          _SwitchRow(
-            value: widget.startMenuIcon,
-            onChanged: widget.onStartMenuIconChanged,
-            label: '创建开始菜单快捷方式',
-          ),
-          _SwitchRow(
-            value: widget.autoStart,
-            onChanged: widget.onAutoStartChanged,
-            label: '开机自动启动',
-          ),
-          _SwitchRow(
-            value: widget.allUsers,
-            onChanged: _toggleAllUsers,
-            label: '为所有用户安装',
-            hint: '需要管理员权限，将安装到 Program Files',
-          ),
-          _SwitchRow(
-            value: widget.createUninstaller,
-            onChanged: widget.onCreateUninstallerChanged,
-            label: '创建卸载程序',
-            hint: '关掉后控制面板里不会出现卸载入口',
+                  // ── 安装位置 ──────────────────────────────────────────
+                  const _SectionLabel('安装位置'),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: SizedBox(
+                          height: 38,
+                          child: TextField(
+                            controller: _dirCtrl,
+                            onChanged: widget.onDirChanged,
+                            style: const TextStyle(fontSize: 12.5, color: Brand.textMain),
+                            decoration: InputDecoration(
+                              isDense: true,
+                              contentPadding:
+                                  const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
+                              filled: true,
+                              fillColor: Colors.white,
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(Brand.radiusSm),
+                                borderSide: const BorderSide(color: Brand.border),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(Brand.radiusSm),
+                                borderSide: const BorderSide(color: Brand.primary, width: 1.4),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      GhostButton(
+                        label: '浏览',
+                        width: 68,
+                        onTap: _browse,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+
+                  // ── 附加任务 ──────────────────────────────────────────
+                  const _SectionLabel('附加任务'),
+                  const SizedBox(height: 4),
+                  _SwitchRow(
+                    value: widget.desktopIcon,
+                    onChanged: widget.onDesktopIconChanged,
+                    label: '创建桌面快捷方式',
+                  ),
+                  _SwitchRow(
+                    value: widget.startMenuIcon,
+                    onChanged: widget.onStartMenuIconChanged,
+                    label: '创建开始菜单快捷方式',
+                  ),
+                  _SwitchRow(
+                    value: widget.autoStart,
+                    onChanged: widget.onAutoStartChanged,
+                    label: '开机自动启动',
+                  ),
+                  _SwitchRow(
+                    value: widget.allUsers,
+                    onChanged: _toggleAllUsers,
+                    label: '为所有用户安装',
+                    hint: '需要管理员权限，将安装到 Program Files',
+                  ),
+                  _SwitchRow(
+                    value: widget.createUninstaller,
+                    onChanged: widget.onCreateUninstallerChanged,
+                    label: '创建卸载程序',
+                    hint: '关掉后控制面板里不会出现卸载入口',
+                  ),
+                ],
+              ),
+            ),
           ),
 
-          const Spacer(),
+          // 按钮行固定在底部，不随中间内容滚动
+          const SizedBox(height: 14),
           Row(
             children: [
               GhostButton(label: '上一步', width: 96, onTap: widget.onBack),
