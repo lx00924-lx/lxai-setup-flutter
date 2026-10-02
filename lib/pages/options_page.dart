@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../theme/brand.dart';
@@ -15,13 +16,17 @@ class OptionsPage extends StatefulWidget {
     required this.installDir,
     required this.agreed,
     required this.desktopIcon,
+    required this.startMenuIcon,
     required this.autoStart,
     required this.allUsers,
+    required this.createUninstaller,
     required this.onDirChanged,
     required this.onAgreedChanged,
     required this.onDesktopIconChanged,
+    required this.onStartMenuIconChanged,
     required this.onAutoStartChanged,
     required this.onAllUsersChanged,
+    required this.onCreateUninstallerChanged,
     required this.onBack,
     required this.onStart,
   });
@@ -29,13 +34,17 @@ class OptionsPage extends StatefulWidget {
   final String installDir;
   final bool agreed;
   final bool desktopIcon;
+  final bool startMenuIcon;
   final bool autoStart;
   final bool allUsers;
+  final bool createUninstaller;
   final ValueChanged<String> onDirChanged;
   final ValueChanged<bool> onAgreedChanged;
   final ValueChanged<bool> onDesktopIconChanged;
+  final ValueChanged<bool> onStartMenuIconChanged;
   final ValueChanged<bool> onAutoStartChanged;
   final ValueChanged<bool> onAllUsersChanged;
+  final ValueChanged<bool> onCreateUninstallerChanged;
   final VoidCallback onBack;
   final VoidCallback onStart;
 
@@ -70,6 +79,34 @@ class _OptionsPageState extends State<OptionsPage> {
     final local = Platform.environment['LOCALAPPDATA'];
     if (local != null && local.isNotEmpty) return '$local\\Programs\\LxAI';
     return r'C:\Program Files\LxAI';
+  }
+
+  /// 「浏览」——调 Windows 自带的文件夹选择对话框。
+  ///
+  /// 用户取消时返回 null，什么都不改（不能把输入框清空）。
+  /// 选完顺手去掉末尾反斜杠：`D:\Apps\` 和 `D:\Apps` 拼出来的子路径会差一个斜杠，
+  /// 而安装计划里到处都在做字符串拼接。
+  Future<void> _browse() async {
+    try {
+      // ⚠️ file_picker 13 起 API 变成**静态调用**（`FilePicker.getDirectoryPath`），
+      //    8.x 时代的 `FilePicker.platform.getDirectoryPath` 已经没有了。
+      final picked = await FilePicker.getDirectoryPath(
+        dialogTitle: '选择 LxAI 的安装位置',
+        // 从当前填的路径开始浏览，省得用户从头找
+        initialDirectory: _dirCtrl.text.trim().isEmpty ? null : _dirCtrl.text.trim(),
+      );
+      if (picked == null || picked.trim().isEmpty) return; // 用户取消：保持原值
+      var dir = picked.trim();
+      while (dir.length > 3 && (dir.endsWith('\\') || dir.endsWith('/'))) {
+        dir = dir.substring(0, dir.length - 1);
+      }
+      _dirCtrl.text = dir;
+      widget.onDirChanged(dir);
+    } catch (e) {
+      // 选不出来不该让整个向导崩掉：保持原值，只记一行日志
+      // ignore: avoid_print
+      print('[Options] 浏览目录失败: $e');
+    }
   }
 
   @override
@@ -144,8 +181,7 @@ class _OptionsPageState extends State<OptionsPage> {
               GhostButton(
                 label: '浏览',
                 width: 68,
-                // M0 占位：真正的目录选择在 M1 接 FilePicker / 自绘目录树
-                onTap: () {},
+                onTap: _browse,
               ),
             ],
           ),
@@ -160,6 +196,11 @@ class _OptionsPageState extends State<OptionsPage> {
             label: '创建桌面快捷方式',
           ),
           _SwitchRow(
+            value: widget.startMenuIcon,
+            onChanged: widget.onStartMenuIconChanged,
+            label: '创建开始菜单快捷方式',
+          ),
+          _SwitchRow(
             value: widget.autoStart,
             onChanged: widget.onAutoStartChanged,
             label: '开机自动启动',
@@ -169,6 +210,12 @@ class _OptionsPageState extends State<OptionsPage> {
             onChanged: _toggleAllUsers,
             label: '为所有用户安装',
             hint: '需要管理员权限，将安装到 Program Files',
+          ),
+          _SwitchRow(
+            value: widget.createUninstaller,
+            onChanged: widget.onCreateUninstallerChanged,
+            label: '创建卸载程序',
+            hint: '关掉后控制面板里不会出现卸载入口',
           ),
 
           const Spacer(),

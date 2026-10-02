@@ -39,6 +39,15 @@ dependencies:
   archive: ^4.3.0
   win32: ^6.4.0
   ffi: ^2.2.0
+  # 「浏览」按钮要的就是系统自带的文件夹选择器：file_picker 的 getDirectoryPath()
+  # 底层走 IFileOpenDialog，正是 Windows 原生那个对话框。
+  # 也可以自己用 win32 手搓 SHBrowseForFolder，但 win32 6.4.0 把 BROWSEINFO 的
+  # hwndOwner / lpszTitle / pszDisplayName 都定义成了**私有字段**，填不进去；
+  # 按字节偏移硬写太脆，不值得。
+  #
+  # ⚠️ 版本必须 ≥13：8.x 依赖 win32 ^5，与本工程的 win32 ^6.4.0（main.dart 用它读
+  #    GetCommandLineW）冲突，pub 直接解不出来。
+  file_picker: ^13.1.0
 
 dev_dependencies:
   flutter_test:

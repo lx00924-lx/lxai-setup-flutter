@@ -82,7 +82,9 @@ class _SetupShellState extends State<SetupShell> {
   // 选项页里由用户主动勾选；"快速安装"不走那一页，用按钮下方的小字做"点击即同意"
   bool _agreed = false;
   bool _desktopIcon = true;
+  bool _startMenuIcon = true;
   bool _autoStart = false;
+  bool _createUninstaller = true;
   bool _allUsers = false;
   bool _runAfterInstall = true;
 
@@ -163,9 +165,10 @@ class _SetupShellState extends State<SetupShell> {
     final plan = InstallPlan(
       installDir: _installDir,
       desktopIcon: _desktopIcon,
-      startMenuIcon: true,
+      startMenuIcon: _startMenuIcon,
       autoStart: _autoStart,
       allUsers: _allUsers,
+      createUninstaller: _createUninstaller,
     );
 
     try {
@@ -352,13 +355,17 @@ class _SetupShellState extends State<SetupShell> {
           installDir: _installDir,
           agreed: _agreed,
           desktopIcon: _desktopIcon,
+          startMenuIcon: _startMenuIcon,
           autoStart: _autoStart,
           allUsers: _allUsers,
+          createUninstaller: _createUninstaller,
           onDirChanged: (v) => setState(() => _installDir = v),
           onAgreedChanged: (v) => setState(() => _agreed = v),
           onDesktopIconChanged: (v) => setState(() => _desktopIcon = v),
+          onStartMenuIconChanged: (v) => setState(() => _startMenuIcon = v),
           onAutoStartChanged: (v) => setState(() => _autoStart = v),
           onAllUsersChanged: (v) => setState(() => _allUsers = v),
+          onCreateUninstallerChanged: (v) => setState(() => _createUninstaller = v),
           onBack: () => setState(() => _step = SetupStep.welcome),
           onStart: _startInstall,
         );
