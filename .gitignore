@@ -54,3 +54,7 @@ windows/flutter/generated_plugin_registrant.h
 windows/flutter/generated_plugins.cmake
 # 安装素材（开发期外置，由构建脚本组装，不入库）
 /payload/
+
+# 单文件安装包的构建中间物与产物（不入库）
+/payload.zip
+/output/
