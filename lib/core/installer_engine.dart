@@ -129,6 +129,8 @@ class InstallerEngine {
     // ── 4) 快捷方式 ──────────────────────────────────────────
     prog(InstallProgress(stage: '正在创建快捷方式…', value: _pCopyEnd));
     final shortcuts = <String>[];
+    // 图标来源优先用"按内容哈希命名的独立 ico"（理由见 _installIcon），拿不到才回退 exe 内嵌图标
+    final iconRef = await _installIcon(plan, log);
     if (plan.desktopIcon) {
       final p = plan.allUsers
           ? '${Shortcut.publicDesktop}\\${plan.appName}.lnk'
@@ -137,7 +139,7 @@ class InstallerEngine {
         linkPath: p,
         target: plan.appExe,
         workingDirectory: plan.installDir,
-        iconPath: '${plan.appExe},0',
+        iconPath: iconRef,
         description: '${plan.appName} —— 远程指挥电脑上的私有 Agent',
       );
       shortcuts.add(p);
@@ -149,7 +151,7 @@ class InstallerEngine {
         linkPath: p,
         target: plan.appExe,
         workingDirectory: plan.installDir,
-        iconPath: '${plan.appExe},0',
+        iconPath: iconRef,
         description: '${plan.appName}',
       );
       shortcuts.add(p);
@@ -304,6 +306,54 @@ class InstallerEngine {
       n++;
     }
     return n;
+  }
+
+  /// 把 App 自带的图标装成 `{app}\app_icon_<内容哈希>.ico`，返回快捷方式要用的 `路径,0`。
+  ///
+  /// **为什么不用现成的 `{app}\LxAI.exe,0`**：Windows 的图标缓存是按**来源路径**索引的 ——
+  /// 路径不变、exe 里的图标却换过了时，shell 会继续显示缓存里的旧图。实测现象就是
+  /// 「右键属性里是新的、桌面上还是旧的」，非得清缓存或重启 explorer 才恢复
+  ///（而这正是用户报的"托盘是新的、桌面是旧的"）。
+  ///
+  /// 按内容哈希命名之后，图标一变路径就变（`app_icon_a1b2c3d4.ico` → `app_icon_5e6f7a8b.ico`），
+  /// 缓存必然 miss —— **不需要任何清缓存/重启资源管理器的操作**就能立刻显示新图标；
+  /// 图标没变时路径也不变，缓存照常复用，不会平白多出文件。
+  ///
+  /// 顺带清掉历史版本的图标副本，避免安装目录里越堆越多。
+  static Future<String> _installIcon(InstallPlan plan, void Function(String) log) async {
+    final src = File('${plan.installDir}\\app_icon.ico');
+    if (!src.existsSync()) {
+      log('未找到 app_icon.ico，快捷方式回退为使用 exe 内嵌图标');
+      return '${plan.appExe},0';
+    }
+    final hash = _fnv1aHex(await src.readAsBytes());
+    final dst = File('${plan.installDir}\\app_icon_$hash.ico');
+    if (!dst.existsSync()) {
+      await src.copy(dst.path);
+    }
+    for (final f in Directory(plan.installDir).listSync()) {
+      if (f is! File) continue;
+      final name = _basename(f.path);
+      if (name.startsWith('app_icon_') &&
+          name.endsWith('.ico') &&
+          name != 'app_icon_$hash.ico') {
+        try {
+          f.deleteSync();
+        } catch (_) {}
+      }
+    }
+    log('快捷方式图标：app_icon_$hash.ico');
+    return '${dst.path},0';
+  }
+
+  /// FNV-1a 32 位哈希：零依赖、够快，用途只是"内容变则名字变"，不需要密码学强度
+  static String _fnv1aHex(List<int> data) {
+    var h = 0x811c9dc5;
+    for (final b in data) {
+      h ^= b;
+      h = (h * 0x01000193) & 0xFFFFFFFF;
+    }
+    return h.toRadixString(16).padLeft(8, '0');
   }
 
   static String _selfName() => _basename(Platform.resolvedExecutable);
