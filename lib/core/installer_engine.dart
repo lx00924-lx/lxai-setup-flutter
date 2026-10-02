@@ -155,6 +155,22 @@ class InstallerEngine {
       shortcuts.add(p);
     }
     log('快捷方式：${shortcuts.length} 个');
+
+    // 通知 Windows 刷新图标缓存。
+    //
+    // 为什么必须做：快捷方式的图标**不是嵌进去的**，而是按"exe 路径 + 索引"动态读取并缓存。
+    // 覆盖安装时 exe 路径没变、图标却换过了，桌面与开始菜单往往会继续显示旧图标
+    // （实测：exe 里的图标已经是新的，桌面还是旧的；连同"托盘是新的、桌面是旧的"这种
+    //  不一致现象都是它造成的）。刷一下就好，代价只有一次约 50ms 的进程调用。
+    if (shortcuts.isNotEmpty) {
+      try {
+        await Process.run('ie4uinit.exe', ['-show'], runInShell: false);
+        InstallLog.write('已通知 shell 刷新图标缓存');
+      } catch (e) {
+        InstallLog.write('刷新图标缓存失败（不影响安装）：$e');
+      }
+    }
+
     prog(InstallProgress(stage: '正在登记卸载信息…', value: _pShortcut));
 
     // ── 5) 注册表：卸载项 +（可选）开机自启 ───────────────────
