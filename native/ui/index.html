@@ -398,6 +398,7 @@
         </div>
         <div class="actions">
           <button class="btn" id="btn-err-back">返回上一步</button>
+          <button class="btn" id="btn-err-elevate" style="display:none">以管理员身份重试</button>
           <button class="btn primary" id="btn-err-close">关闭</button>
         </div>
       </section>
@@ -556,6 +557,10 @@
 
       else if (m.type === 'install-error') {
         $('err-detail').textContent = m.message || '未知错误。';
+        // 只有"没权限"这一类错误才给提权按钮 —— 别的情况下点了也没用，
+        // 摆在那里只会让用户以为"再点一次就能好"。
+        var needAdmin = /权限|拒绝访问|ACCESS_DENIED|管理员/i.test(m.message || '');
+        $('btn-err-elevate').style.display = needAdmin ? '' : 'none';
         showView('view-error');
       }
     });
@@ -625,6 +630,13 @@
   };
   $('btn-finish').onclick = function () { send('close'); };
   $('btn-err-back').onclick = function () { showView('view-options', 2); };
+  $('btn-err-elevate').onclick = function () {
+    // 宿主会 ShellExecuteEx(runas) 把自己重新拉起来（带 --auto --dir），
+    // 成功的话它会把当前这个进程关掉 —— 所以这里不用再做别的。
+    $('err-detail').textContent = '正在请求管理员权限…（若弹出 UAC 请点「是」）';
+    $('btn-err-elevate').disabled = true;
+    send('elevate', { dir: installDir });
+  };
   $('btn-err-close').onclick = function () { send('close'); };
 </script>
 </body>
