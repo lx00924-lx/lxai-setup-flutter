@@ -1,0 +1,13 @@
+// 把界面文件编进 exe（RCDATA 资源）。
+//
+// ⚠️ 文件必须**纯 ASCII**：rc.exe 对非 ASCII 的 .rc 有代码页要求（要么加 BOM，
+//    要么 #pragma code_page(65001)），而这个文件里本来就只有资源声明，没必要冒险。
+//
+// 路径相对于本文件所在目录（native\ui\），所以 build.ps1 不用往返拷文件。
+
+#include <windows.h>
+#include "../src/resource_ids.h"
+
+IDR_UI_INDEX    RCDATA  "index.html"
+IDR_UI_ICON_PNG RCDATA  "app_icon.png"
+IDR_UI_ICON_ICO RCDATA  "app_icon.ico"

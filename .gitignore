@@ -59,7 +59,11 @@ windows/flutter/generated_plugins.cmake
 /payload.zip
 /output/
 # 原生安装器：WebView2 SDK 与构建产物不入库
-/native/third_party/
+# ⚠️ 例外：`third_party/miniz/` **必须入库** —— 它是 vendored 的构建必需品
+#    （读 exe 尾部追加的 ZIP 就靠它），不像 WebView2 SDK 那样可以现拉。
+#    不入库的话别人 clone 下来直接编不过。
+/native/third_party/*
+!/native/third_party/miniz/
 /native/build/
 
 # 安装器自测沙箱（用改过的 LOCALAPPDATA 启动时默认目录会落进这里）

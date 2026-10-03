@@ -10,6 +10,7 @@
 
 #include <windows.h>
 #include <shellapi.h>      // ShellExecuteW：缺 WebView2 时打开官方下载页要用
+#include <shlwapi.h>        // SHCreateMemStream：把内嵌资源喂给 WebView2
 #include <shobjidl_core.h> // IFileOpenDialog：选安装目录
 #include <wrl.h>
 #include <WebView2.h>
@@ -20,7 +21,11 @@
 #include <thread>
 #include <vector>
 
+#include "embedded.h"
 #include "install_engine.h"
+#include "registry.h"
+#include "resource_ids.h"
+#include "uninstaller.h"
 
 using Microsoft::WRL::Callback;
 using Microsoft::WRL::ComPtr;
@@ -32,6 +37,21 @@ namespace {
 HWND g_hwnd = nullptr;
 ComPtr<ICoreWebView2Controller> g_controller;
 ComPtr<ICoreWebView2> g_webview;
+/// 处理虚拟主机请求时要靠它造响应，所以创建 controller 时顺手存下来。
+ComPtr<ICoreWebView2Environment> g_env;
+
+/// 是不是"卸载器身份"在跑。启动时判一次，全程复用。
+bool g_uninstallMode = false;
+
+/// 提权重启后要自动安装到的目录（由 `--auto --dir <路径>` 带过来）。
+/// 空 = 正常走向导。**等界面 ready 之后再启动**：早了的话进度事件会打在
+/// 还没建好的 webview 上，用户只看到一页静止的欢迎界面然后直接跳完成。
+std::wstring g_autoInstallDir;
+
+/// 界面虚拟主机。界面文件编在资源里，没有磁盘路径可导航 ——
+/// 于是造一个假域名，所有请求都由 WebResourceRequested 从资源里回。
+/// 这样 HTML 里 `<img src="app_icon.png">` 这种相对引用照常能解析。
+constexpr wchar_t kUiHost[] = L"https://lxai.setup/";
 
 /// 安装是否正在后台跑。用来挡住"装到一半用户点了 X"。
 std::atomic<bool> g_installing{false};
@@ -109,39 +129,11 @@ std::wstring JsonEscape(const std::wstring& s) {
   return out;
 }
 
-/// 从 exe 所在目录**逐级向上**找 ui\index.html。
-///
-/// 为什么逐级向上：开发期 exe 在 native\build\Release\ 里，而 ui\ 在 native\ 下；
-/// 正式打包时 ui 会被塞进 exe 内部（N3 再做）。逐级找能让开发期直接跑起来。
-bool FindUpwards(const wchar_t* relative, std::wstring& outPath, int maxLevels = 6) {
-  std::wstring dir = ParentDir(ExeDir());
-  for (int i = 0; i < maxLevels && !dir.empty(); ++i) {
-    const std::wstring candidate = dir + L"\\" + relative;
-    if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) {
-      outPath = candidate;
-      return true;
-    }
-    dir = ParentDir(dir);
-  }
-  return false;
-}
-
-/// 素材目录：同样逐级向上找 `payload\`（判据是里面真有 `app\LxAI.exe`）。
-///
-/// N3 之后这里会先变成"从 exe 尾部解出来的临时目录"，但对调用方来说接口不变。
-bool FindPayloadDir(std::wstring& outDir) {
-  std::wstring probe;
-  if (!FindUpwards(L"payload\\app\\LxAI.exe", probe)) return false;
-  // 去掉尾巴上的 app\LxAI.exe，留下 payload 目录本身
-  outDir = ParentDir(ParentDir(probe));
-  return true;
-}
-
 /// 默认安装位置：**当前用户**的 `%LOCALAPPDATA%\Programs\LxAI`。
 ///
 /// 为什么默认选用户目录而不是 Program Files：装 Program Files 必须提权，
-/// 而一个还没做完 UAC 流程的安装器默认弹管理员对话框，只会让用户一脸问号地取消。
-/// 等 N4 把提权做完整了，「为所有用户安装」再作为可选项出现。
+/// 会平白多一次 UAC 打断。要装那边的用户走「浏览」自己选，安装失败时会给出
+/// 「以管理员身份重试」的出路（见 RelaunchElevated）。
 std::wstring DefaultInstallDir() {
   const std::wstring local = EnvVar(L"LOCALAPPDATA", ExeDir());
   return local + L"\\Programs\\LxAI";
@@ -224,25 +216,83 @@ void BeginWindowDrag(HWND hwnd) {
 /// 窗口/任务栏图标（Alt+Tab、任务栏、标题栏左上角那一个小方块）。
 ///
 /// 不设的话这三处都是系统默认的空白图标 —— 安装器一眼看着就不像正经软件。
-/// 用界面目录里的 `app_icon.ico`（与 App 是同一张脸，见 native/ui/）。
-/// 找不到就算了，**不因此让安装失败**：图标是锦上添花，不是功能。
+/// 图标**编在 exe 资源里**（`IDR_UI_ICON_ICO`），不再依赖旁边的文件 ——
+/// 单文件分发包里根本没有"旁边"。
+/// 取不到就算了，**不因此让安装失败**：图标是锦上添花，不是功能。
 HICON g_iconSmall = nullptr;
 HICON g_iconBig = nullptr;
 
-void ApplyWindowIcon(HWND hwnd, const std::wstring& uiFile) {
-  const std::wstring ico = ParentDir(uiFile) + L"\\app_icon.ico";
-
-  // 大、小两个尺寸分别取系统要的像素数：多尺寸 .ico 里让 LoadImage 挑最合适的那张，
+void ApplyWindowIcon(HWND hwnd, HINSTANCE instance) {
+  // 大、小两个尺寸分别取系统要的像素数：多尺寸 .ico 里让系统挑最合适的那张，
   // 比"加载一张让系统缩"清晰得多（16×16 用 256×256 缩出来是糊的）。
   g_iconSmall = static_cast<HICON>(LoadImageW(
-      nullptr, ico.c_str(), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
-      GetSystemMetrics(SM_CYSMICON), LR_LOADFROMFILE));
+      instance, MAKEINTRESOURCEW(IDR_UI_ICON_ICO), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+      GetSystemMetrics(SM_CYSMICON), 0));
   g_iconBig = static_cast<HICON>(LoadImageW(
-      nullptr, ico.c_str(), IMAGE_ICON, GetSystemMetrics(SM_CXICON),
-      GetSystemMetrics(SM_CYICON), LR_LOADFROMFILE));
+      instance, MAKEINTRESOURCEW(IDR_UI_ICON_ICO), IMAGE_ICON, GetSystemMetrics(SM_CXICON),
+      GetSystemMetrics(SM_CYICON), 0));
 
   if (g_iconSmall) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(g_iconSmall));
   if (g_iconBig) SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(g_iconBig));
+}
+
+/// 界面文件从资源里供给：把 `https://lxai.setup/<name>` 映射到 RCDATA。
+///
+/// 为什么不用 `NavigateToString`：那样页面没有基准 URL，HTML 里
+/// `<img src="app_icon.png">` 解析不出来，品牌标识会变成裂图。
+/// 虚拟主机 + 请求拦截是 WebView2 为这种"资源内置"场景准备的正规做法。
+HRESULT OnWebResourceRequested(ICoreWebView2* /*sender*/,
+                               ICoreWebView2WebResourceRequestedEventArgs* args) {
+  if (!g_env) return S_OK;
+
+  ComPtr<ICoreWebView2WebResourceRequest> request;
+  if (FAILED(args->get_Request(&request)) || !request) return S_OK;
+  LPWSTR rawUri = nullptr;
+  if (FAILED(request->get_Uri(&rawUri)) || rawUri == nullptr) return S_OK;
+  std::wstring uri(rawUri);
+  CoTaskMemFree(rawUri);
+
+  // 只取主机之后的部分，去掉查询串
+  std::wstring name = uri;
+  const size_t host = name.find(L"lxai.setup");
+  if (host != std::wstring::npos) name = name.substr(host + 10);
+  while (!name.empty() && (name.front() == L'/' || name.front() == L'\\')) name.erase(name.begin());
+  const size_t query = name.find_first_of(L"?#");
+  if (query != std::wstring::npos) name = name.substr(0, query);
+  if (name.empty()) name = L"index.html";
+
+  int resId = 0;
+  const wchar_t* mime = L"application/octet-stream";
+  if (_wcsicmp(name.c_str(), L"index.html") == 0) {
+    resId = IDR_UI_INDEX;
+    mime = L"text/html; charset=utf-8";
+  } else if (_wcsicmp(name.c_str(), L"app_icon.png") == 0) {
+    resId = IDR_UI_ICON_PNG;
+    mime = L"image/png";
+  } else if (_wcsicmp(name.c_str(), L"app_icon.ico") == 0) {
+    resId = IDR_UI_ICON_ICO;
+    mime = L"image/x-icon";
+  }
+
+  ComPtr<ICoreWebView2WebResourceResponse> response;
+  if (resId == 0) {
+    g_env->CreateWebResourceResponse(nullptr, 404, L"Not Found", L"", &response);
+  } else {
+    std::vector<unsigned char> bytes;
+    if (!lxai::LoadUiResource(resId, &bytes)) {
+      g_env->CreateWebResourceResponse(nullptr, 500, L"Internal Error", L"", &response);
+    } else {
+      // WebView2 要 IStream：SHCreateMemStream 复制一份内存即可，
+      // 不用自己写 IStream 实现。
+      IStream* stream = SHCreateMemStream(bytes.data(), static_cast<UINT>(bytes.size()));
+      if (stream == nullptr) return S_OK;
+      const std::wstring headers = std::wstring(L"Content-Type: ") + mime;
+      g_env->CreateWebResourceResponse(stream, 200, L"OK", headers.c_str(), &response);
+      stream->Release();  // CreateWebResourceResponse 已经 AddRef
+    }
+  }
+  if (response) args->put_Response(response.Get());
+  return S_OK;
 }
 
 // ───────────────────────── 桥：JS → C++ ─────────────────────────
@@ -336,9 +386,45 @@ void PostToUiThread(const std::wstring& json) {
   }
 }
 
+// ───────────────────────── 卸载流程 ─────────────────────────
+
+/// 卸载成功后要删的安装目录。**不立刻删** —— 卸载器自己就住在
+/// `{install}\uninstaller\` 里，运行中删不掉；存下来等窗口关闭、进程要退出时再交给 VBS。
+std::wstring g_selfDestructDir;
+
+void RunUninstallOnWorker(std::wstring installDir) {
+  const auto onProgress = [](const std::wstring& stage, double value) {
+    wchar_t buf[64];
+    swprintf_s(buf, L"%.4f", value);
+    PostToUiThread(L"{\"type\":\"progress\",\"stage\":\"" + JsonEscape(stage) +
+                   L"\",\"value\":" + buf + L"}");
+  };
+
+  const lxai::UninstallResult r = lxai::RunUninstall(installDir, onProgress);
+
+  if (!r.ok) {
+    PostToUiThread(L"{\"type\":\"install-error\",\"message\":\"" + JsonEscape(r.error) + L"\"}");
+    g_installing = false;
+    return;
+  }
+
+  if (r.needsSelfDestruct) g_selfDestructDir = installDir;
+
+  PostToUiThread(L"{\"type\":\"uninstall-done\",\"files\":" + std::to_wstring(r.filesDeleted) +
+                 L",\"closed\":" + std::to_wstring(r.processesClosed) + L",\"closedNames\":\"" +
+                 JsonEscape(r.closedNames) + L"\",\"dir\":\"" + JsonEscape(installDir) + L"\"}");
+  g_installing = false;
+}
+
+void StartUninstall(const std::wstring& installDir) {
+  if (g_installing.exchange(true)) return;
+  std::thread(RunUninstallOnWorker, installDir).detach();
+}
+
+
 // ───────────────────────── 安装流程 ─────────────────────────
 
-void RunInstallOnWorker(lxai::InstallOptions options) {
+void RunInstallOnWorker(lxai::InstallOptions options, lxai::PayloadSource payload) {
   const std::wstring installDir = options.installDir;
 
   // onProgress 在 worker 线程被高频调用，这里只做"转成 JSON 丢给 UI 线程"这一件事。
@@ -352,18 +438,65 @@ void RunInstallOnWorker(lxai::InstallOptions options) {
   const lxai::InstallResult result = lxai::RunInstall(options, onProgress);
 
   if (result.ok) {
+    // ── 系统集成：卸载器 + 注册表卸载项 ──
+    //
+    // 这两件**放在文件铺完之后**：它们失败了也只是"控制面板里没有卸载入口"，
+    // 而 App 本体已经能跑；反过来先写注册表再失败，用户会得到一个指向空目录的卸载项。
+    const auto report2 = [&](const std::wstring& stage, double value) {
+      wchar_t buf[64];
+      swprintf_s(buf, L"%.4f", value);
+      PostToUiThread(L"{\"type\":\"progress\",\"stage\":\"" + JsonEscape(stage) +
+                     L"\",\"value\":" + buf + L"}");
+    };
+
+    bool uninstallerDeployed = false;
+    std::wstring uninstallError;
+    report2(L"正在部署卸载程序…", 0.90);
+    uninstallerDeployed = lxai::DeployUninstaller(installDir, &uninstallError);
+
+    bool registryWritten = false;
+    if (uninstallerDeployed) {
+      report2(L"正在登记卸载信息…", 0.94);
+      lxai::AppInfo app;
+      const bool hasInfo = lxai::ReadAppInfoFromExe(lxai::AppExePath(installDir), &app);
+      const std::wstring name = (hasInfo && !app.productName.empty()) ? app.productName : L"LxAI";
+      const std::wstring version = (hasInfo && !app.productVersion.empty()) ? app.productVersion : L"1.0.0";
+
+      lxai::UninstallEntry entry;
+      entry.displayName = name + L" " + version;
+      entry.displayVersion = version;
+      entry.publisher = (hasInfo && !app.companyName.empty()) ? app.companyName : L"LxAI Team";
+      entry.installLocation = installDir + L"\\";
+      entry.uninstallString = L"\"" + installDir + L"\\uninstaller\\uninstall.exe\"";
+      entry.displayIcon = lxai::AppExePath(installDir);
+      entry.urlInfoAbout = L"https://github.com/lx00924-lx/flutter-app";
+      entry.estimatedSizeKb = static_cast<int>(result.bytesCopied / 1024);
+      entry.allUsers = false;  // 默认装法就是当前用户，写 HKCU
+
+      std::wstring regError;
+      registryWritten = lxai::WriteUninstallEntry(entry, &regError);
+      if (!registryWritten) uninstallError = regError;
+    }
+
     PostToUiThread(L"{\"type\":\"install-done\",\"files\":" +
                    std::to_wstring(result.filesCopied) + L",\"bytes\":" +
                    std::to_wstring(result.bytesCopied) + L",\"closed\":" +
                    std::to_wstring(result.processesClosed) + L",\"closedNames\":\"" +
                    JsonEscape(result.closedNames) + L"\",\"shortcuts\":" +
                    std::to_wstring(result.shortcutsCreated) + L",\"autostart\":" +
-                   (result.autoStartSet ? L"true" : L"false") + L",\"dir\":\"" +
+                   (result.autoStartSet ? L"true" : L"false") + L",\"uninstaller\":" +
+                   (uninstallerDeployed ? L"true" : L"false") + L",\"registry\":" +
+                   (registryWritten ? L"true" : L"false") + L",\"uninstallError\":\"" +
+                   JsonEscape(uninstallError) + L"\",\"dir\":\"" +
                    JsonEscape(installDir) + L"\"}");
   } else {
     PostToUiThread(L"{\"type\":\"install-error\",\"message\":\"" +
                    JsonEscape(result.error) + L"\"}");
   }
+
+  // 素材是从 exe 尾部解到临时目录的 —— 装完就没用了，尽快删掉。
+  // 25 MB 留在 %TEMP% 里既不体面，也会让用户在下一次清理磁盘时莫名其妙。
+  lxai::CleanupPayload(payload);
   g_installing = false;
 }
 
@@ -406,18 +539,22 @@ void StartInstall(const std::wstring& requestedDir, bool desktopIcon, bool start
                   bool autoStart) {
   if (g_installing.exchange(true)) return;  // 防连点：已经在装了就别再起一个
 
-  std::wstring payloadDir;
-  if (!FindPayloadDir(payloadDir)) {
+  // 素材来源：优先 exe 尾部（单文件分发包），其次旁边的 payload\ 目录（开发期）。
+  // 解包 25 MB 要一两秒，所以先在**主线程**做掉再起 worker —— 这样"正在准备…"
+  // 期间界面还能正常显示，而不是点完按钮半天没动静。
+  PostToUiThread(L"{\"type\":\"progress\",\"stage\":\"正在准备安装素材…\",\"value\":0.01}");
+
+  lxai::PayloadSource payload;
+  std::wstring payloadError;
+  if (!lxai::ResolvePayload(&payload, &payloadError)) {
     g_installing = false;
-    PostToUiThread(
-        L"{\"type\":\"install-error\",\"message\":\"找不到安装素材目录 payload。\\n\\n"
-        L"开发期请把 exe 放在仓库内运行（素材在 native\\\\..\\\\payload）；\\n"
-        L"正式分发包请确认 exe 完整、未被安全软件拆分。\"}");
+    PostToUiThread(L"{\"type\":\"install-error\",\"message\":\"" + JsonEscape(payloadError) +
+                   L"\"}");
     return;
   }
 
   lxai::InstallOptions options;
-  options.payloadDir = payloadDir;
+  options.payloadDir = payload.dir;
   options.installDir = requestedDir.empty() ? DefaultInstallDir() : requestedDir;
   options.desktopIcon = desktopIcon;
   options.startMenuIcon = startMenuIcon;
@@ -425,7 +562,32 @@ void StartInstall(const std::wstring& requestedDir, bool desktopIcon, bool start
 
   // detach 而不是 join：worker 只通过 PostMessage 与外界通信，窗口在安装期间不会销毁
   // （WM_CLOSE 里挡着），所以生命期是安全的。
-  std::thread(RunInstallOnWorker, options).detach();
+  std::thread(RunInstallOnWorker, options, payload).detach();
+}
+
+/// 以管理员身份重新启动自己，并把当前的选择原样带过去。
+///
+/// 为什么需要它：默认装到 `%LOCALAPPDATA%`（免提权），但用户完全可以选
+/// `C:\Program Files` —— 那时候写权限探测会失败。与其只丢一句"没有权限"，
+/// 不如直接给一条能走通的路。
+///
+/// `--dir` 把用户已经选好的目录带过去，`--auto` 让它重启后**直接开装**，
+/// 免得用户以为"点了没反应"又点一遍。
+bool RelaunchElevated(const std::wstring& installDir) {
+  const std::wstring self = lxai::OwnExePath();
+  if (self.empty()) return false;
+
+  std::wstring args = L"--elevated --auto --dir \"" + installDir + L"\"";
+  SHELLEXECUTEINFOW sei{};
+  sei.cbSize = sizeof(sei);
+  sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+  sei.lpVerb = L"runas";  // ← 触发 UAC
+  sei.lpFile = self.c_str();
+  sei.lpParameters = args.c_str();
+  sei.nShow = SW_SHOWNORMAL;
+  if (!ShellExecuteExW(&sei)) return false;  // 用户点了"否"也走这里
+  if (sei.hProcess) CloseHandle(sei.hProcess);
+  return true;
 }
 
 /// 让用户挑安装目录。用现代的 IFileOpenDialog（`FOS_PICKFOLDERS`），
@@ -477,26 +639,48 @@ HRESULT OnWebMessageReceived(ICoreWebView2* /*sender*/, ICoreWebView2WebMessageR
     std::wstring ver;
     const bool hasWebView2 = ProbeWebView2(ver);
 
-    std::wstring payloadDir;
-    const bool hasPayload = FindPayloadDir(payloadDir);
-
+    // 素材状态。单文件分发包里素材在 exe 尾部 —— 只读 ZIP 中央目录量一下，
+    // **不解压**（解压 25 MB 要一两秒，欢迎页没必要等）。
+    bool hasPayload = false;
     int fileCount = 0;
     unsigned long long totalBytes = 0;
-    const bool measured = hasPayload && lxai::MeasurePayload(payloadDir, fileCount, totalBytes);
+    if (lxai::HasAppendedPayload()) {
+      hasPayload = lxai::MeasureAppendedPayload(&fileCount, &totalBytes);
+      // 尾部有素材但量不出来（ZIP 坏了）也算"有"，让真正安装时报错，
+      // 而不是在欢迎页就把用户拦住 —— 那时他还没得及做任何选择。
+      hasPayload = true;
+    }
 
     SendToJs(L"{\"type\":\"host-info\",\"webview2\":\"" + JsonEscape(ver) +
              L"\",\"ok\":true,\"hasWebView2\":" + (hasWebView2 ? L"true" : L"false") +
-             L",\"payloadDir\":\"" + JsonEscape(payloadDir) +
+             L",\"mode\":\"" + (g_uninstallMode ? L"uninstall" : L"install") +
              L"\",\"payloadOk\":" + (hasPayload ? L"true" : L"false") +
              L",\"payloadFiles\":" + std::to_wstring(fileCount) +
              L",\"payloadBytes\":" + std::to_wstring(totalBytes) +
-             L",\"measured\":" + (measured ? L"true" : L"false") +
-             L",\"defaultDir\":\"" + JsonEscape(DefaultInstallDir()) + L"\"}");
+             L",\"measured\":" + (totalBytes > 0 ? L"true" : L"false") +
+             L",\"installDir\":\"" +
+             JsonEscape(g_uninstallMode ? lxai::InstallDirFromUninstaller() : DefaultInstallDir()) +
+             L"\"}");
+
+    // 提权重启后的自动安装：**等界面就绪再开**，否则进度事件没有落点。
+    if (!g_autoInstallDir.empty()) {
+      const std::wstring dir = g_autoInstallDir;
+      g_autoInstallDir.clear();
+      StartInstall(dir, true, true, false);
+    }
   } else if (type == L"start-install") {
     // 三个开关没传时用"快速安装"的语义兜底（桌面建、开始菜单建、自启不建）
     StartInstall(ExtractJsonString(msg, L"dir"), ExtractJsonBool(msg, L"desktopIcon", true),
                  ExtractJsonBool(msg, L"startMenuIcon", true),
                  ExtractJsonBool(msg, L"autoStart", false));
+  } else if (type == L"start-uninstall") {
+    StartUninstall(ExtractJsonString(msg, L"dir"));
+  } else if (type == L"elevate") {
+    // 目标目录写不进去 → 以管理员身份重来一次。用户点了"否"就什么都不做，
+    // 界面上的错误说明还在，他还能改目录或手动退出。
+    if (RelaunchElevated(ExtractJsonString(msg, L"dir"))) {
+      if (g_hwnd) PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
+    }
   } else if (type == L"launch-app") {
     LaunchInstalledApp(ExtractJsonString(msg, L"dir"));
   } else if (type == L"browse-dir") {
@@ -523,13 +707,13 @@ std::wstring UserDataDir() {
   return ExeDir() + L"\\.webview2";
 }
 
-void InitWebView2(HWND hwnd, const std::wstring& uiFile) {
+void InitWebView2(HWND hwnd) {
   const std::wstring userData = UserDataDir();
 
   const HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
       nullptr, userData.c_str(), nullptr,
       Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-          [hwnd, uiFile](HRESULT result, ICoreWebView2Environment* env) -> HRESULT {
+          [hwnd](HRESULT result, ICoreWebView2Environment* env) -> HRESULT {
             if (FAILED(result) || env == nullptr) {
               MessageBoxW(hwnd,
                           L"WebView2 运行时存在，但初始化失败。\n"
@@ -537,12 +721,12 @@ void InitWebView2(HWND hwnd, const std::wstring& uiFile) {
                           L"LxAI 安装程序", MB_ICONERROR | MB_OK);
               return S_OK;
             }
+            // 存下来：WebResourceRequested 里要拿它造响应
+            g_env = env;
             env->CreateCoreWebView2Controller(
                 hwnd,
                 Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-                    // ⚠️ 必须捕获 uiFile：这是**内层** lambda，它在外层 lambda 的闭包里，
-                    //    写 `[]` 是访问不到的（MSVC 会报 C2326「函数无法访问 uiFile」）。
-                    [uiFile](HRESULT r2, ICoreWebView2Controller* controller) -> HRESULT {
+                    [](HRESULT r2, ICoreWebView2Controller* controller) -> HRESULT {
                       if (FAILED(r2) || controller == nullptr) return S_OK;
                       g_controller = controller;
                       controller->get_CoreWebView2(&g_webview);
@@ -564,15 +748,22 @@ void InitWebView2(HWND hwnd, const std::wstring& uiFile) {
                           Callback<ICoreWebView2WebMessageReceivedEventHandler>(OnWebMessageReceived).Get(),
                           &token);
 
+                      // 界面文件编在资源里，没有磁盘路径可导航 ——
+                      // 造个虚拟主机，请求全由我们从资源回（见 OnWebResourceRequested）。
+                      EventRegistrationToken resToken{};
+                      g_webview->AddWebResourceRequestedFilter(
+                          (std::wstring(kUiHost) + L"*").c_str(),
+                          COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL);
+                      g_webview->add_WebResourceRequested(
+                          Callback<ICoreWebView2WebResourceRequestedEventHandler>(
+                              OnWebResourceRequested).Get(),
+                          &resToken);
+
                       // 注：不用 AddHostObjectToScript / AreHostObjectsAllowed —— 那套是把
                       // C++ 对象直接暴露成 JS 属性，权限面大。这里走 postMessage 传 JSON，
                       // 边界清楚（只有我们自己认的 type 会被处理），安装器不需要更强的东西。
 
-                      std::wstring url = uiFile;
-                      for (auto& c : url) {
-                        if (c == L'\\') c = L'/';
-                      }
-                      g_webview->Navigate((L"file:///" + url).c_str());
+                      g_webview->Navigate((std::wstring(kUiHost) + L"index.html").c_str());
                       return S_OK;
                     })
                     .Get());
@@ -620,6 +811,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     L"LxAI 安装程序", MB_ICONINFORMATION | MB_OK);
         return 0;
       }
+      // 卸载成功后要删整个安装目录（含卸载器自己）—— 只能等我们退出后由 VBS 干。
+      // 放在这里而不是卸载一完成就安排：那时用户还在看"卸载完成"这一页，
+      // 目录被抽走了窗口却还在，观感很怪。
+      if (!g_selfDestructDir.empty()) {
+        std::wstring ignored;
+        lxai::ScheduleSelfDestruct(g_selfDestructDir, &ignored);
+        g_selfDestructDir.clear();
+      }
       if (g_controller) g_controller->Close();
       DestroyWindow(hwnd);
       return 0;
@@ -638,6 +837,33 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
 
   // 高 DPI：不设的话 125%/150% 缩放下界面会糊，安装器观感很掉档
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+  // ── 命令行 ──
+  //   --uninstall        以卸载器身份运行（也可靠"自己住在 uninstaller\ 下"识别）
+  //   --elevated --auto --dir <路径>   提权重启后自动开装
+  //   --dir <路径>       指定安装目录
+  g_uninstallMode = lxai::IsUninstallerRun();
+  {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv != nullptr) {
+      bool autoInstall = false;
+      std::wstring dir;
+      for (int i = 1; i < argc; ++i) {
+        if (_wcsicmp(argv[i], L"--auto") == 0) {
+          autoInstall = true;
+        } else if (_wcsicmp(argv[i], L"--dir") == 0 && i + 1 < argc) {
+          dir = argv[++i];
+        }
+      }
+      if (autoInstall && !dir.empty()) g_autoInstallDir = dir;
+      LocalFree(argv);
+    }
+  }
+
+  // 窗口标题跟着身份走：卸载时写「卸载 LxAI」，
+  // 免得用户在任务管理器/Alt+Tab 里看到一个写着"安装程序"的东西却正在卸载。
+  const wchar_t* title = g_uninstallMode ? L"卸载 LxAI" : kWindowTitle;
 
   // ── 第 1 步：环境检测。缺 WebView2 就直接给提示并退出，别走到后面白屏 ──
   std::wstring version;
@@ -664,7 +890,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
 
   // 无边框：标题栏交给 HTML 自绘（与 Flutter 版一致的做法）
   const DWORD style = WS_POPUP | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
-  g_hwnd = CreateWindowExW(0, kWindowClass, kWindowTitle, style, CW_USEDEFAULT, CW_USEDEFAULT,
+  g_hwnd = CreateWindowExW(0, kWindowClass, title, style, CW_USEDEFAULT, CW_USEDEFAULT,
                            kClientWidth, kClientHeight, nullptr, nullptr, instance, nullptr);
   if (!g_hwnd) {
     MessageBoxW(nullptr, L"创建窗口失败。", L"LxAI 安装程序", MB_ICONERROR | MB_OK);
@@ -676,17 +902,24 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
   UpdateWindow(g_hwnd);
 
   // ── 第 3 步：起 WebView2 并加载界面 ──
-  std::wstring uiFile;
-  if (!FindUpwards(L"ui\\index.html", uiFile)) {
-    MessageBoxW(g_hwnd,
-                L"找不到界面文件（ui\\index.html）。\n"
-                L"开发期请从仓库根目录运行 native\\build.ps1 生成后再跑。",
-                L"LxAI 安装程序", MB_ICONERROR | MB_OK);
-    if (SUCCEEDED(comHr)) CoUninitialize();
-    return 1;
+  // 界面文件编在 exe 资源里（`ui/ui.rc` → RCDATA），磁盘上不需要任何伴随文件 ——
+  // 这正是"单文件"的另一半。取不到只可能是构建出了问题，所以直接说清楚。
+  {
+    std::vector<unsigned char> probe;
+    if (!lxai::LoadUiResource(IDR_UI_INDEX, &probe)) {
+      MessageBoxW(g_hwnd,
+                  L"这份安装程序内部缺少界面资源，无法启动。\n"
+                  L"它可能已损坏，请重新下载；若你是从源码构建的，请检查 native\\ui\\ui.rc 是否被打进 exe。",
+                  L"LxAI 安装程序", MB_ICONERROR | MB_OK);
+      if (SUCCEEDED(comHr)) CoUninitialize();
+      return 1;
+    }
   }
-  ApplyWindowIcon(g_hwnd, uiFile);
-  InitWebView2(g_hwnd, uiFile);
+  ApplyWindowIcon(g_hwnd, instance);
+  InitWebView2(g_hwnd);
+
+  // 注：提权重启后的自动安装不在这里启动 —— 它要等界面 ready（见 OnWebMessageReceived），
+  // 否则进度事件打在还没建好的 webview 上，用户会看到静止的欢迎页突然跳到完成页。
 
   // ── 消息循环 ──
   MSG msg{};

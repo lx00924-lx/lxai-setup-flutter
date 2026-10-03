@@ -122,6 +122,9 @@
   button.btn[disabled]{opacity:.45;cursor:not-allowed}
   button.primary{background:var(--primary);border-color:var(--primary);color:#fff}
   button.primary:hover{background:var(--primary-dark)}
+  /* 危险动作（卸载）用描边 + 玫红：看得见，但与主按钮拉开距离，不诱导误点 */
+  button.danger{border-color:#FECACA;color:var(--danger)}
+  button.danger:hover{background:var(--danger-soft);border-color:#FCA5A5}
 
   /* 安装位置 */
   .field{margin-top:6px}
@@ -252,6 +255,43 @@
           <span class="actions-hint" id="welcome-hint">正在检查安装包…</span>
           <button class="btn" id="btn-custom" disabled>自定义安装</button>
           <button class="btn primary" id="btn-quick" disabled>快速安装</button>
+        </div>
+      </section>
+
+      <!-- ───────── 卸载模式：确认页 ─────────
+           同一个 exe，靠 `--uninstall` 或"住在 uninstaller\ 下"识别身份（见 uninstaller.cpp）。
+           界面代码完全复用，只有这一页与几个标题按 mode 切换。 -->
+      <section class="view" id="view-uninstall">
+        <h2>卸载 LxAI</h2>
+        <div class="lead">将从这台电脑上移除 LxAI。</div>
+        <div class="scroll">
+          <div class="card">
+            <h3>将会删除</h3>
+            <div class="muted" style="margin-top:0">
+              · 程序文件与内置的 Python 运行时；<br>
+              · 桌面与开始菜单的快捷方式；<br>
+              · 「应用和功能」里的卸载入口；<br>
+              · 开机自动启动项（如果开过）。
+            </div>
+          </div>
+          <div class="card">
+            <h3>将会保留</h3>
+            <div class="muted" style="margin-top:0">
+              · <strong>你的聊天记录、登录状态与全部设置</strong>（存在「文档」目录里）。<br>
+              卸载一个客户端不该顺手把你的聊天记录也抹掉 —— 重新安装后会原样回来。<br>
+              确实想彻底清空的话，卸载后手动删除「文档」下的 <code>*_box.hive</code>。
+            </div>
+          </div>
+          <div class="card">
+            <h3>卸载位置</h3>
+            <div class="row"><span class="dot ok"></span>
+              <span class="v" id="v-uninstall-dir" style="font-size:11.5px">—</span></div>
+          </div>
+        </div>
+        <div class="actions">
+          <span class="actions-hint" id="uninstall-hint"></span>
+          <button class="btn" id="btn-uninstall-cancel">取消</button>
+          <button class="btn danger" id="btn-uninstall-go">卸载</button>
         </div>
       </section>
 
@@ -396,6 +436,9 @@
   }
 
   var installDir = '';
+  // 卸载模式：同一个 exe 的第二种身份，由宿主的 host-info.mode 告知。
+  var uninstallMode = false;
+  var uninstallDir = '';
 
   if (!host) {
     // 直接用浏览器打开本文件时会走到这里 —— 不是错误，只是没有宿主
@@ -406,7 +449,21 @@
       var m = e.data || {};
 
       if (m.type === 'host-info') {
-        installDir = m.defaultDir || '';
+        // 宿主身份：安装还是卸载。同一个 exe 两种身份，界面按这个切。
+        if (m.mode === 'uninstall') {
+          uninstallMode = true;
+          uninstallDir = m.installDir || '';
+          $('v-uninstall-dir').textContent = uninstallDir || '（推不出来，请从「应用和功能」里卸载）';
+          $('btn-uninstall-go').disabled = !uninstallDir;
+          $('steps').innerHTML =
+            '<li data-step="1" class="active">确认卸载</li>' +
+            '<li data-step="2">正在卸载</li>' +
+            '<li data-step="3">完成</li>';
+          showView('view-uninstall');
+          return;
+        }
+
+        installDir = m.installDir || '';
         $('dir-input').value = installDir;
 
         var sizeText = m.measured ? (m.payloadFiles + ' 个文件 · ' + fmtBytes(m.payloadBytes)) : '';
@@ -449,12 +506,35 @@
         var notes = [];
         if (m.shortcuts > 0) notes.push('已创建 ' + m.shortcuts + ' 个快捷方式');
         if (m.autostart) notes.push('已设置开机自动启动');
+        // 卸载器与注册表也要如实说 —— 它们决定"用户以后能不能正常卸载"，
+        // 而这两件恰好是失败时不会打断安装的（失败只是没有卸载入口）。
+        if (m.uninstaller) {
+          notes.push(m.registry
+            ? '已登记卸载信息（可在「应用和功能」中卸载）'
+            : '已部署卸载程序，但**没能**登记到「应用和功能」');
+        } else if (m.uninstallError) {
+          notes.push('卸载程序部署失败：' + m.uninstallError);
+        }
         if (m.closed > 0) notes.push('安装前已自动关闭正在运行的程序（' + m.closedNames + '）');
         $('done-detail').textContent =
           '安装位置：' + (m.dir || installDir) + '\n' +
           '已铺开 ' + m.files + ' 个文件，共 ' + fmtBytes(m.bytes) + '。' +
           (notes.length ? '\n' + notes.join('；') + '。' : '');
         showView('view-done', 4);
+      }
+
+      else if (m.type === 'uninstall-done') {
+        $('prog-fill').style.width = '100%';
+        $('prog-pct').textContent = '100%';
+        var un = [];
+        if (m.files > 0) un.push('已删除 ' + m.files + ' 项');
+        if (m.closed > 0) un.push('卸载前已关闭正在运行的程序（' + m.closedNames + '）');
+        $('done-detail').textContent =
+          'LxAI 已从这台电脑上移除。' +
+          (un.length ? '\n' + un.join('；') + '。' : '') +
+          '\n你的聊天记录与设置仍保留在「文档」目录里。\n' +
+          '（安装目录会在本窗口关闭后由后台脚本清理干净）';
+        showView('view-done', 3);
       }
 
       else if (m.type === 'launch-result') {
@@ -514,6 +594,24 @@
   }
 
   $('btn-quick').onclick = function () { beginInstall(installDir); };
+  $('btn-uninstall-cancel').onclick = function () { send('close'); };
+  $('btn-uninstall-go').onclick = function () {
+    // 进度页/完成页的标题跟着身份走 —— 卸载时还写着"正在安装 LxAI"就太荒唐了。
+    $('view-progress').querySelector('h2').textContent = '正在卸载';
+    $('view-progress').querySelector('.lead').textContent =
+      '请勿关闭窗口，卸载完成后会自动进入下一步。';
+    $('view-done').querySelector('h2').textContent = '卸载完成';
+    $('view-done').querySelector('.lead').textContent = 'LxAI 已从这台电脑上移除。';
+    // 卸载完成后"启动应用"没有意义了，藏掉，只留「完成」
+    $('btn-launch').style.display = 'none';
+    $('btn-finish').textContent = '完成';
+    $('prog-dir').textContent = uninstallDir;
+    $('prog-stage').textContent = '正在准备…';
+    $('prog-pct').textContent = '0%';
+    $('prog-fill').style.width = '0%';
+    showView('view-progress', 2);
+    send('start-uninstall', { dir: uninstallDir });
+  };
   $('btn-custom').onclick = function () { showView('view-options', 2); };
   $('btn-back1').onclick = function () { showView('view-welcome', 1); };
   $('btn-browse').onclick = function () { send('browse-dir', { dir: $('dir-input').value }); };
