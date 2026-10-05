@@ -10,11 +10,12 @@
 （未签名 DLL、非官方 API、跨 Inno 版本与 DPI 都脆）。自研 Flutter 是为了**用正常 UI
 框架拿到完整控制权**，代价是 ~28 MB 的 Flutter 运行时、且做不成单文件。
 
-**当前状态：M0 / M1 / M2 / M4 已完成** —— 无边框四步向导 + 真实安装引擎
-（解包素材、写文件、建快捷方式、写注册表卸载项、清占用进程、覆盖安装、开机自启）
-+ 完整卸载流程（含 VBS 延迟自毁）。
-**未完成：M3（单文件打包 / 提权分支）与 M5（代码签名 / 对接自更新）**，见下方「里程碑」与
-「单文件安装包」两节。
+**当前状态：全部里程碑只差 M5。** Flutter 版 M0 / M1 / M2 / M4 已完成
+（无边框四步向导 + 真实安装引擎：解包素材、写文件、建快捷方式、写注册表卸载项、
+清占用进程、覆盖安装、开机自启 + 完整卸载流程含 VBS 延迟自毁）；
+**原生版（现在的主线，见下方「原生版」与「N2」两节）已经把 M3 也做完了** ——
+`tool\build-installer.ps1` 一键出 25.5 MB 单文件、卸载器、快捷方式、开机自启全部落地并实测。
+**未完成：M5（代码签名 / 对接自更新）**；另有 UAC 提权分支虽已实现但**从未实测**（见文末 N2 收尾）。
 
 > 🔀 **2026-10-04：单文件这条路上，已决定改走原生方案。**
 > 上面这套 Flutter 版**暂时保留可用**（它把安装逻辑都写清楚了，是原生版的行为参照），
@@ -53,7 +54,8 @@ powershell -File tool\build-payload.ps1   # 把 App 产物 + 私有 Python 铺�
 - [x] **M0** 无边框窗口 + 四步跳转
 - [x] **M1** payload 解压 + 写文件 + 建快捷方式
 - [x] **M2** 注册表卸载项 + `--uninstall` 模式（部署为 `{app}\uninstaller\uninstall.exe`）
-- [ ] **M3** 单文件打包 + 提权分支 ← **两件事都还没做，见下节**
+- [x] **M3** 单文件打包（`tool\build-installer.ps1` 出 25.5 MB 单文件）+ 提权分支
+      （`RelaunchElevated`；⚠️ 提权这条**只有代码、没实测过**，见本文件末尾 N2 收尾）
 - [x] **M4** 覆盖安装（清占用进程）+ 开机自启
 - [ ] **M5** 代码签名 + 对接 App 自更新
 
@@ -62,6 +64,8 @@ powershell -File tool\build-payload.ps1   # 把 App 产物 + 私有 Python 铺�
 ## 单文件安装包（M3）：实测结论与待选项
 
 > 这一节是**实测**出来的，不是推测。重做之前先看完，能省掉一轮试错。
+> ⚠️ 下面列的候选**已经定了**：2026-10-04 选了 D（C++ + WebView2 原生版），
+> 且 10-03 就已落地成单文件 exe。本节保留为"为什么不能走 Flutter 那条路"的证据。
 
 ### 结论：Flutter 应用做不到"单个 exe 直接跑"
 
@@ -109,11 +113,14 @@ powershell -File tool\build-payload.ps1   # 把 App 产物 + 私有 Python 铺�
 - **Inno 原生就在 `{app}` 放 `unins000.exe`**（装完目录里那个卸载 exe），
   不用像本工程现在这样自己部署一份到 `{app}\uninstaller\`。
 
-### 另一件没做的事：提权
+### 另一件没做的事：提权（方案已选定并实现，但没实测）
 
-「为所有用户安装」开关目前**只改了安装路径与注册表分支（HKLM）**，
-**没有实际做 UAC 提权**（没有 `ShellExecuteEx` + `runas`）。所以非管理员勾它，
-写 `Program Files` / HKLM 会失败。要做 M3 时一并补上。
+这里说的是**Flutter 版**：「为所有用户安装」开关目前**只改了安装路径与注册表分支（HKLM）**，
+没有 UAC 提权，所以非管理员勾它、写 `Program Files` / HKLM 会失败。
+
+✅ **原生版已经补上**：`RelaunchElevated()`（`ShellExecuteEx` + `runas`，带 `--elevated --auto --dir`）。
+⚠️ 但这条分支**从未在真机上跑过** —— 默认装在 `%LOCALAPPDATA%\Programs\LxAI`，
+不需要提权，所以一直没走到它。要用之前先隔离目标目录验证。
 
 ## 原生版（`native/`）：C++ + WebView2 —— 这是往后的主线
 
@@ -344,10 +351,10 @@ powershell -ExecutionPolicy Bypass -File native\build.ps1   # 拉 SDK → CMake 
 本次测试前把用户原有的 `Desktop\LxAI.lnk` 与 Run 值备份到临时目录，测完逐项还原并核对
 （快捷方式目标回到正式安装、字节数一致、Run 值逐字相同、测试新建的开始菜单项删掉）。
 
-**为什么注册表卸载项这次没做**：`UninstallString` 要指向卸载器，而卸载器还没做。
-现在写进去只会得到一个点了没反应的"卸载"按钮，而且会**覆盖掉旧 Inno 版留下的、
-目前还能用的那个条目**。这一块跟卸载器一起做，前置条件是先把界面嵌进 exe
-（否则复制到 `{app}\uninstaller\` 的那份 exe 找不到自己的 `ui\`）。
+**注册表卸载项这件事已经补上了**（当初推迟的理由是卸载器还没做，见下方 N2 收尾）：
+现在 `WriteUninstallEntry` 会写入 `UninstallString`，指向部署好的
+`{app}\uninstaller\uninstall.exe`；界面先嵌进 exe 这个前置条件也已满足
+（素材走虚拟主机 `https://lxai.setup/`，那份被截短的 exe 能找到自己的 UI）。
 
 **N2 第五部分新增的坑**：
 
@@ -362,12 +369,17 @@ powershell -ExecutionPolicy Bypass -File native\build.ps1   # 拉 SDK → CMake 
 20. `HKCU` 与 `HKLM` 下 `...\CurrentVersion\Run` 的**路径字符串是一样的**，只有根不同。
     别照着 Flutter 版的样子写一个带 `allUsers` 参数却返回同一串东西的函数。
 
-**待办（N2 余下）**：
+**N2 收尾（原待办 4 条，2026-10-03 全部落地）**：
 
-1. 快捷方式（`IShellLink`）、注册表卸载项、开机自启。
-2. 部署 `{app}\uninstaller\uninstall.exe` + VBS 自毁（卸载器自己也要走一遍"先杀后卸"）。
-3. 素材追加进 exe 尾部做成**真单文件**（当前仍读旁边的 `payload\` 目录）。
-4. **UAC 提权**（`ShellExecuteEx` + `runas`），让「装到 Program Files」真正可用。
+1. ✅ 快捷方式（`IShellLink`，桌面路径走 `SHGetKnownFolderPath(FOLDERID_Desktop)`）、
+   注册表卸载项、开机自启。
+2. ✅ 部署 `{app}\uninstaller\uninstall.exe` + VBS 自毁（卸载器自己也要走一遍"先杀后卸"）。
+3. ✅ 素材追加进 exe 尾部做成**真单文件**（32 字节尾部标记 `LXAIZIP1`，`tool\build-installer.ps1` 产出）。
+4. ✅ **UAC 提权**（`RelaunchElevated`：`ShellExecuteEx` + `runas`）。
+
+⚠️ 上面第 4 条**只有代码、没有实测**：默认装到 `%LOCALAPPDATA%\Programs\LxAI`
+（免管理员、不弹 UAC），所以"装到 `Program Files`"那条分支至今没在真机上跑过。
+真要用它之前，先照本文件「开发期注意」那节的做法隔离目标目录再验证。
 
 ## ⚠️ 开发期注意
 
