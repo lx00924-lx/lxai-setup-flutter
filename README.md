@@ -15,7 +15,8 @@
 清占用进程、覆盖安装、开机自启 + 完整卸载流程含 VBS 延迟自毁）；
 **原生版（现在的主线，见下方「原生版」与「N2」两节）已经把 M3 也做完了** ——
 `tool\build-installer.ps1` 一键出 25.5 MB 单文件、卸载器、快捷方式、开机自启全部落地并实测。
-**未完成：M5（代码签名 / 对接自更新）**；另有 UAC 提权分支虽已实现但**从未实测**（见文末 N2 收尾）。
+**未完成：M5（代码签名 / 对接自更新）**；另有 UAC 提权分支**代码已写完、只是没专门实测**
+（默认装 `%LOCALAPPDATA%` 走不到那条分支，已决定不单独验证；见文末 N2 收尾）。
 
 > 🔀 **2026-10-04：单文件这条路上，已决定改走原生方案。**
 > 上面这套 Flutter 版**暂时保留可用**（它把安装逻辑都写清楚了，是原生版的行为参照），
@@ -55,7 +56,7 @@ powershell -File tool\build-payload.ps1   # 把 App 产物 + 私有 Python 铺�
 - [x] **M1** payload 解压 + 写文件 + 建快捷方式
 - [x] **M2** 注册表卸载项 + `--uninstall` 模式（部署为 `{app}\uninstaller\uninstall.exe`）
 - [x] **M3** 单文件打包（`tool\build-installer.ps1` 出 25.5 MB 单文件）+ 提权分支
-      （`RelaunchElevated`；⚠️ 提权这条**只有代码、没实测过**，见本文件末尾 N2 收尾）
+      （`RelaunchElevated`；⚠️ 提权这条**代码完整、未专门实测**——已决定不单独验证，见文末 N2 收尾）
 - [x] **M4** 覆盖安装（清占用进程）+ 开机自启
 - [ ] **M5** 代码签名 + 对接 App 自更新
 
@@ -118,9 +119,10 @@ powershell -File tool\build-payload.ps1   # 把 App 产物 + 私有 Python 铺�
 这里说的是**Flutter 版**：「为所有用户安装」开关目前**只改了安装路径与注册表分支（HKLM）**，
 没有 UAC 提权，所以非管理员勾它、写 `Program Files` / HKLM 会失败。
 
-✅ **原生版已经补上**：`RelaunchElevated()`（`ShellExecuteEx` + `runas`，带 `--elevated --auto --dir`）。
-⚠️ 但这条分支**从未在真机上跑过** —— 默认装在 `%LOCALAPPDATA%\Programs\LxAI`，
-不需要提权，所以一直没走到它。要用之前先隔离目标目录验证。
+✅ **原生版已经补上**：`RelaunchElevated()`（`ShellExecuteEx` + `runas`，带 `--elevated --auto --dir`），
+界面侧「以管理员身份重试」按钮只在报"没权限"类错误时露出。
+⚠️ 这条分支**代码完整但未专门实测**（已决定不单独验证）：默认装在 `%LOCALAPPDATA%\Programs\LxAI`
+不需要提权，所以走不到它；要用之前先隔离目标目录验证。
 
 ## 原生版（`native/`）：C++ + WebView2 —— 这是往后的主线
 
@@ -377,9 +379,11 @@ powershell -ExecutionPolicy Bypass -File native\build.ps1   # 拉 SDK → CMake 
 3. ✅ 素材追加进 exe 尾部做成**真单文件**（32 字节尾部标记 `LXAIZIP1`，`tool\build-installer.ps1` 产出）。
 4. ✅ **UAC 提权**（`RelaunchElevated`：`ShellExecuteEx` + `runas`）。
 
-⚠️ 上面第 4 条**只有代码、没有实测**：默认装到 `%LOCALAPPDATA%\Programs\LxAI`
-（免管理员、不弹 UAC），所以"装到 `Program Files`"那条分支至今没在真机上跑过。
-真要用它之前，先照本文件「开发期注意」那节的做法隔离目标目录再验证。
+⚠️ 上面第 4 条**代码是完整的，只是没专门实测**（已决定不单独验证，非遗留缺口）：
+默认装到 `%LOCALAPPDATA%\Programs\LxAI`（免管理员、不弹 UAC），
+用户不改路径就走不到"装到 `Program Files`"那条分支；真走到时行为也是良性的
+（UAC 点「否」→ 旧窗口原地不动、错误说明还在，用户仍可改目录或退出）。
+哪天要验证，先照本文件「开发期注意」那节的做法隔离目标目录。
 
 ## ⚠️ 开发期注意
 
